@@ -1,0 +1,2 @@
+- we are just working on plan documents before building this app.
+- No code yet, but we can get specific about technologies we will use
