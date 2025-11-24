@@ -5,8 +5,8 @@ export interface AudioNode {
   audioUrl: string;
   parentId: string | null;
   duration: number;
-  createdAt: Date;
-  updatedAt: Date;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface AudioMetadata {
@@ -32,4 +32,15 @@ export interface RecordingStatus {
   isRecording: boolean;
   isPaused: boolean;
   duration: number;
+}
+
+export interface UploadUrlResponse {
+  uploadUrl: string;
+  key: string;
+}
+
+export interface SaveAudioRequest {
+  key: string;
+  duration: number;
+  parentId: string | null;
 }
