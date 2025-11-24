@@ -1,2 +1,10 @@
-- we are just working on plan documents before building this app.
-- No code yet, but we can get specific about technologies we will use
+- keep functions small, controllers skinny, try to maintain separation of templates and calculation code
+- add tests whenever possible
+- tests can be run from the root with `npm run test` and should be run before considering a feature finished
+- when developing a new feature, write a test first and then get it to pass
+- also run `npm run check` from the root before considering a task finished
+- to make database requests use `npm run db:query`
+- database schema is located at backend/prisma/schema.prisma
+- `npm run migrate` from the root handles database migrations
+- use types in the shared directory whenever possible to maintain type safety between the inputs and outputs of the front and back end
+- keep documentation up to date when making changes to architecture, adding new services, or modifying infrastructure. Current state documentation lives in the main README and docs/ directory. Planning documentation should be placed in docs/plans/

@@ -1,0 +1,24 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model AudioNode {
+  id        String   @id @default(uuid())
+  audioUrl  String
+  parentId  String?
+  parent    AudioNode? @relation("AudioNodeChildren", fields: [parentId], references: [id])
+  children  AudioNode[] @relation("AudioNodeChildren")
+  duration  Int      // Duration in seconds
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([parentId])
+}

@@ -1,0 +1,32 @@
+{
+  "name": "tapstory-monorepo",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "backend",
+    "mobile",
+    "shared"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace=backend",
+    "dev:mobile": "npm run start --workspace=mobile",
+    "build": "npm run build --workspace=shared && npm run build --workspace=backend",
+    "build:mobile": "npm run build --workspace=mobile",
+    "test": "npm run test --workspace=shared && npm run test --workspace=backend",
+    "test:watch": "npm test -- --watch",
+    "check": "npm --workspaces run check",
+    "prisma": "npm exec --workspace backend prisma",
+    "migrate": "npm run migrate --workspace=backend",
+    "seed": "npm run seed --workspace=backend",
+    "db:push": "npm run prisma -- db push",
+    "db:query": "npm run db:query --workspace=backend",
+    "deploy:api": "node scripts/deploy.js backend",
+    "deploy:mobile:ios": "cd mobile && eas build --platform ios",
+    "deploy:mobile:android": "cd mobile && eas build --platform android",
+    "clean": "npm run clean --workspaces --if-present",
+    "reset": "./scripts/reset-all.sh"
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3"
+  }
+}
