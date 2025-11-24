@@ -5,6 +5,7 @@ module.exports = {
   testMatch: ['**/__tests__/**/*.ts', '**/?(*.)+(spec|test).ts'],
   moduleNameMapper: {
     '^@shared/(.*)$': '<rootDir>/../shared/src/$1',
+    '^uuid$': require.resolve('uuid'),
   },
   collectCoverageFrom: [
     'src/**/*.ts',
