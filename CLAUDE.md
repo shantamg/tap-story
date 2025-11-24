@@ -7,4 +7,4 @@
 - database schema is located at backend/prisma/schema.prisma
 - `npm run migrate` from the root handles database migrations
 - use types in the shared directory whenever possible to maintain type safety between the inputs and outputs of the front and back end
-- keep documentation up to date when making changes to architecture, adding new services, or modifying infrastructure. Current state documentation lives in the main README and docs/ directory. Planning documentation should be placed in docs/plans/
+- keep documentation up to date when making changes to architecture, adding new services, or modifying infrastructure. Current state documentation lives in docs/ directory (see docs/README.md for structure). Planning documentation should be placed in docs/plans/
