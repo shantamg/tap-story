@@ -1,183 +1,103 @@
-# Product Requirement Document: "Tap Story"
+# **Product Plan: Tap Story \- Collaborative Social Mode**
 
-## 1. Executive Summary
+## **1\. Vision: The "Living Tree" of Sound**
 
-**Tap Story** is a native iOS audio application that reimagines the multi-track recorder as a fluid, elastic storytelling medium.
+While the core of Tap Story is a high-performance recorder, its soul is a very specific kind of **Social Tree**.  
+At the heart of the structure is a chain of **overlapping duets**: each person records on top of the previous recording and **always leaves a tail** that extends past it, so the next person can duet _that_ tail and then leave a new one of their own. Because any tail could have multiple possible duets, this creates a living tree of linked performances, each branch defined by who chose to pick up which tail. It could be intended as just a back and forth with a friend, or could become a social experiment where multiple paths can be taken (or even mixed).
 
-At its core, it is a high-performance audio tool that allows users to record and play back audio at _any_ speed or pitch, maintaining perfect synchronization regardless of how the timeline is stretched.
+## **2\. The Core Mechanic: Branching Narratives**
 
-In its future state, Tap Story evolves into a turn-based collaborative game (a "Musical Exquisite Corpse"). Users pass a session file back and forth. Each player receives the story, adjusts the tempo to their liking, and adds their contribution to the end of the chain. The story grows longer with every turn, but previous chapters remain immutable.
+### **2.1 The Data Structure**
 
-## 2. Technical Architecture
+The content is organized as a **Directed Acyclic Graph (DAG)**.
 
-### 2.1. Technology Stack
+- **The Seed:** The root node of the tree.
+- **The Node:** Every recording is an immutable entity containing:
+  - Audio File (The user's contribution mixed with the parent).
+  - Metadata (Relative Speed/Pitch settings).
+  - Parent ID (The node this was recorded on top of).
+- **The Branch:** When a user records onto an existing node, they do not overwrite it. They create a new **Child Node**.
 
-- **Platform:** iOS (Native).
-- **Language:** Swift 6.0+
-- **UI Framework:** SwiftUI (Required for fluid "Pill" animations and gesture handling).
-- **Audio Engine:** `AVAudioEngine` (AVFoundation).
-- **DSP Nodes:**
-  - `AVAudioUnitTimePitch`: For independent control of rate and pitch.
-  - `AVAudioUnitVarispeed`: For "linked" tape-deck style control.
-- **Data Persistence:** SwiftData for local metadata; FileSystem for `.wav` storage.
-- **Future Cloud Stack:** CloudKit (recommended for seamless turn-based file sharing).
+### **2.2 Visualizing the Tree**
 
-### 2.2. The Core "Elastic" Audio Engine
+- **The Map (iPad/Mac):** Users can zoom out to see the lineage of a story, visualized like a subway map or evolutionary tree.
+- **The Ghost Pills (iPhone):** When listening to a track, alternative branches appear as "Ghost Pills" above or below the active track. Swiping Up/Down seamlessly switches audio to that parallel universe.
 
-The engine must support **Non-Destructive Elasticity**.
+### **2.3 The "Canon" (Social Curation)**
 
-- **Global State:** `MasterPlaybackRate` (Default: 1.0), `MasterPitchOffset` (Default: 0 semitones).
-- **Track Metadata:** Every audio file (`Asset`) saves:
-  - `RecordedAtRate` — the `MasterPlaybackRate` at the moment of recording.
-  - `RecordedAtPitchOffset` — the `MasterPitchOffset` at the moment of recording.
-- **Playback Calculation (Speed):** When the engine plays, each track’s player node is assigned a rate calculated dynamically so that its _relative_ tempo to the master is preserved:
-  $$\text{NodeRate} = \frac{\text{MasterPlaybackRate}}{\text{Asset.RecordedAtRate}}$$
-  - _Scenario:_ Player A records a drum beat at 0.5x speed. Player B sets Master Speed to 1.0x. Player A's drum beat automatically plays back at 2.0x speed to stay in sync.
-    -- **Playback Calculation (Pitch):** Each track’s playback pitch is computed relative to the master so that what you recorded “against” a slowed or shifted master stays musically aligned when the master changes:
-    $$\text{NodePitchOffset} = \text{MasterPitchOffset} - \text{Asset.RecordedAtPitchOffset} + \text{TrackLocalPitchOffset}$$
-  - _Scenario:_ Player A records a melody while the master is shifted down \(-3\) semitones. Later, the master is reset to 0. The engine automatically adds \(+3\) semitones to Player A’s clip (plus any local offset) so the melody still feels the same relative to the new master.
-- **Independent Pitch Control:** Each track also has a non-destructive local pitch parameter (`TrackLocalPitchOffset`, in semitones/cents) that can be adjusted independently of speed.
-- **Link / Unlink Behavior:** At the engine level, pitch and speed can be linked (classic tape-machine varispeed) or unlinked (time-stretch with constant pitch), mirroring the `AVAudioUnitTimePitch` / `AVAudioUnitVarispeed` configuration. The `RecordedAtRate` / `RecordedAtPitchOffset` fields always capture whatever the performer was hearing at record time, so later master changes preserve each clip’s relative speed and pitch.
+With infinite branching, navigation requires curation.
 
----
+- **Likes \= Gravity:** Users vote on specific nodes.
+- **The Canon Path:** When a user presses "Play" on a Seed, the app dynamically calculates the "path of least resistance" (the nodes with the highest cumulative likes) and plays that version as the "Hit Single."
+- **Deep Cuts:** Users can manually "Walk the Tree" to explore unpopular, experimental, or weird branches.
 
-## 3. User Interface (UI) Concepts
+## **3\. The "Game" Rules (Interaction Design)**
 
-### 3.1. The Canvas (Tap Story Board)
+To prevent chaos and gamify the creation process, Contributors must follow specific constraints.
 
-- **Visual Metaphor:** A branching story tree of takes and responses.
-- **Tree View:** A hierarchical view where each recording can branch into many possibilities. This view is primarily for **navigating and understanding the branching structure**, not for detailed waveform editing.
-- **Nodes:** Each node in the tree represents a recording (or a group of recordings) and its possible child branches.
-- **Recording Mode:** When recording, the UI switches to a focused mode where you only see:
-  - The node you are recording **onto** (the current context you are responding to).
-  - The node you are currently **recording** (the new branch being created).
-    This avoids visual noise and keeps the performer focused on the immediate interaction, while the tree view remains available for broader navigation outside of active recording.
+### **3.1 The "Extension" Rule**
 
-### 3.2. The Control Header
+To successfully submit a new branch, the user **must extend the story**.
 
-- **Speed Dial:** Rotary control for Master Speed (0.25x to 2.0x).
-- **Pitch Dial:** Rotary control for Pitch, with:
-  - **Semitone snapping** for musical intervals.
-  - **Fine adjustment** (e.g., via modifier, long-press, or secondary gesture) for subtle detuning between semitones.
-- **Link Toggle:** Chain icon.
-  - _Linked:_ Tape-machine behavior (Faster = Higher Pitch).
-  - _Unlinked:_ Time-stretch behavior (Faster = Same Pitch).
-- **The Click:** A metronome icon. Tapping enables a click track that syncs to the Master Speed.
+- **Input:** A user can start listening or monitoring from anywhere in the parent track.
+- **Constraint:** The new recording must end _after_ the parent node's end time.
+- **Result:** The story physically grows longer with every valid turn.
 
-### 3.3. The Footer
+### **3.2 The "Chain of Duets" Flow**
 
-- **The "Plus" Button:** Adds a new track to the stack.
-- **Contextual Hints:** Subtle text appearing during gestures (e.g., "Hold to Punch In").
+The recording workflow is automated to encourage flow:
 
----
+1. **Context:** Player B selects Player A's node.
+2. **Auto-Cue:** Recording automatically starts at the _end_ of Player A's audio (or overlaps the tail).
+3. **The Handoff:** Player B plays their part.
+4. **The Lock:** Once submitted, Player B cannot edit Player A's audio. The past is immutable.
 
-## 4. User Experience (UX) Flows
+## **4\. Backend Architecture (AWS Serverless)**
 
-### 4.1. Navigation & Scrubbing
+To support this massive branching structure without managing servers, we utilize the AWS Mobile Stack.
 
-- **Gesture:** Swipe left/right on the background to scroll time.
-- **Vinyl Scrub (Opt-In):** Users can choose between **silent scrolling** and **scrubbing**:
-  - By default, scrolling is silent so you can move around without hearing playback.
-  - When in a scrubbing mode (e.g., while holding a modifier, in a specific gesture state, or while playback is active), the audio engine "scrubs" (plays short buffers) matching the drag speed to help find transients by ear.
+### **4.1 The Tech Stack**
 
-### 4.2. The "Gesture-First" Recording Workflow
+- **API Gateway:** **AWS AppSync** (GraphQL).
+  - _Why:_ GraphQL is ideal for fetching trees (e.g., "Get Node X and all its Children").
+- **Database:** **Amazon DynamoDB**.
+  - _Pattern:_ Adjacency List (Single Table Design).
+  - _Partition Key:_ StoryID.
+  - _Sort Key:_ NodeID.
+- **Storage:** **Amazon S3**.
+- **Processing:** **AWS Lambda** \+ **FFmpeg Layer**.
 
-There are no transport buttons (Play/Record/Stop). Recording is gesture-driven.
+### **4.2 The "Bounce Down" Strategy**
 
-**Step 1: Target (The Punch-In Point)**
+To keep client performance high, we do not stream 50 separate tracks for a 50-node story.
 
-1.  **Action:** User **Touch & Holds (1s)** on an empty track area.
-2.  **Feedback:** Haptic click. UI enters "Target Mode."
-3.  **Refine:** User drags finger left/right to scrub and find the exact entry point.
-4.  **Set:** User releases finger. A **Red Marker** appears at that timestamp.
+- **Local Mix:** When recording, the engine mixes the "Parent" \+ "Input".
+- **Cloud Bounce:** Upon submission, AWS Lambda processes the audio:
+  1. **Decodes** the new input (WAV).
+  2. **Mixes** it with the Parent Node's audio.
+  3. **Encodes** a new, single stereo file for the Child Node.
+- **Result:** The next user only downloads **one file**, preserving bandwidth and battery.
 
-**Step 2: Pre-Roll (The Run-Up)**
+### **4.3 Hybrid Quality Sync**
 
-1.  **Action:** User **Touch & Holds** anywhere _before_ the Red Marker.
-2.  **Refine:** Drag backward to find a listening start point (e.g., 4 bars back).
+To ensure the app feels "Instant" (like a social network) but remains "Professional" (like a DAW):
 
-**Step 3: The Take**
+1. **Tier 1 (Fast):** The app uploads a compressed **AAC** version immediately. The node appears on the Global Tree instantly.
+2. **Tier 2 (Archival):** In the background (Wi-Fi only), the app uploads the uncompressed **WAV** and the _isolated_ stem.
+3. **Future Export:** A user can eventually "Export Project" to download the un-bounced, high-quality stems for mixing in Logic Pro or Ableton.
 
-1.  **Action:** With the **Playhead fixed in the center** of the screen, the user scrolls the timeline horizontally (silent by default) until they find their desired pre-roll start point.
-2.  **Result:** When they are ready, the user taps to **start playback from that position**.
-3.  **Transition:** When the Playhead hits the **Red Marker**, the app switches to **Record Mode** (punches in).
-4.  **Visual:** A red "Pill" (or recording indicator) draws in real-time from the punch-in point.
+## **5\. Data Model (DynamoDB Schema)**
 
-**Step 4: Stop**
+**Table: TapStory_Nodes**
 
-1.  **Action:** Tap anywhere. Recording stops.
-2.  **Review:** The user can:
-    - **Swipe horizontally** to move the timeline under the fixed playhead and audition different moments.
-    - **Tap anywhere** to start playback from that position.
-    - **Swipe the new Pill up** to delete it.
-
----
-
-## 5. Collaborative "Tap Story" Mode
-
-This section outlines the turn-based multiplayer architecture to be implemented after the core recorder is stable.
-
-### 5.1. The "Correspondence" Mechanic
-
-- **Asynchronous Multiplayer:** Only one user "holds the pen" at a time.
-- **State Management:**
-  - _Active State:_ It is your turn. You can edit speed/pitch and record.
-  - _Locked State:_ It is not your turn. You can listen, but you cannot record or modify tracks.
-
-### 5.2. "Tap Story" Rules (The Game Loop)
-
-The goal is to create an evolving **chain of duets**, but with a **simple, automatic recording workflow** (gesture-based targeting can come later).
-
-1.  **First Take:** Player A records an initial segment. This establishes the **timeline** but there is no prior tail yet.
-2.  **Second Take (First Duet):** When Player B records onto Player A:
-    - Their recording **automatically starts at the very beginning** of Player A's recording (no need to choose a start point).
-    - They must record **past the end of Player A's take**, leaving a **tail** that extends beyond the original.
-3.  **Subsequent Takes:** For every take after that (Player A or B):
-    - The new recording **automatically starts at the end of the previous tail**.
-    - The performer must again record **past that point**, creating a **new, longer tail** for the next duet.
-4.  **Chain of Duets:** Over time, this creates a linear chain where each duet builds on the previous one and always leaves new space for the next person.
-5.  **Immutable Past:** No one can delete or overwrite previous takes; each contribution only **adds** to the chain.
-6.  **Send:** When a player finishes their duet segment, the session syncs to the cloud and the other participant is notified that **a new tail is available**.
-
----
-
-## 6. Detailed Feature Requirements
-
-### 6.1. The Click Track (Metronome)
-
-- Must be synthesized programmatically to remain crisp at low speeds.
-- Never recorded into the final audio bounce.
-
-### 6.2. Visualizing "Stretch" (The Pill Physics)
-
-- **The Formula:** `RenderedWidth = AudioDuration * (1 / MasterSpeed) * ZoomFactor`.
-- This gives the user physical confirmation of the time manipulation. Slowing down time makes the world "bigger."
-
-### 6.3. Immutable Relative Data
-
-- Tap Story uses non-destructive editing.
-- We never "render" the time stretch into the file permanently. We only render the playback instructions. This preserves the highest audio quality and allows the next collaborator to speed it back up without artifacts.
-
----
-
-## 7. Technical Implementation Plan
-
-### Phase 1: The Engine & Canvas
-
-- **Goal:** `AVAudioEngine` running with a scrolling SwiftUI canvas.
-- **Key Task:** Implement the "Scrubbing" logic: Map `ScrollView` offset $\leftrightarrow$ `audioPlayerNode.scheduleSegment`.
-
-### Phase 2: Variable Speed Logic
-
-- **Goal:** Speed control without pitch shift.
-- **Key Task:** Insert `AVAudioUnitTimePitch` into the graph. Implement the `NodeRate = Master / RecordedRate` math.
-
-### Phase 3: The Gesture Workflow
-
-- **Goal:** The "No Buttons" recording flow.
-- **Key Task:** Implement `UILongPressGestureRecognizer` states: `Idle` $\rightarrow$ `Targeting` $\rightarrow$ `PreRolling` $\rightarrow$ `Recording`.
-
-### Phase 4: Data Layer
-
-- **Goal:** Save/Load Projects.
-- **Key Task:** Create a `TrackModel` (SwiftData) that stores the `recordedAtRate` float for every file.
+| Attribute         | Type   | Description                                  |
+| :---------------- | :----- | :------------------------------------------- |
+| **PK**            | String | STORY\#\<UUID\> (Groups the whole tree)      |
+| **SK**            | String | NODE\#\<UUID\> (Unique ID)                   |
+| ParentID          | String | NODE\#\<UUID\> (Pointer to previous node)    |
+| AudioURL_Lossy    | String | S3 Link (AAC)                                |
+| AudioURL_Lossless | String | S3 Link (WAV)                                |
+| RecordedAtRate    | Float  | 1.0, 0.75, etc. (Crucial for Elastic Engine) |
+| Duration          | Number | Length in seconds                            |
+| Likes             | Number | Counter for "Canon" calculation              |
+| AuthorID          | String | User ID                                      |
