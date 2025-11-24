@@ -10,22 +10,28 @@ Tap Story will integrate with cloud services for storage, processing, and infras
 
 ### Audio Storage
 
-**AWS S3 or Cloudflare R2**
+**AWS S3** ✅ Configured
 
 Purpose: Cloud object storage for audio files
 
 - **Why:** Scalable, reliable storage for audio recordings
 - **Use Cases:**
-  - Store user-recorded audio files
+  - Store user-recorded audio files (direct client uploads)
   - Store mixed/processed audio
-  - Serve audio files to mobile app
+  - Serve audio files to mobile app via presigned URLs
 
 **Configuration:**
-- Bucket for audio files
-- Signed URLs for secure access
-- CDN for fast global delivery (if using R2)
+- Bucket: AWS S3 (configured via AWS_S3_BUCKET env variable)
+- Presigned URLs for secure upload/download (1-hour expiration)
+- Direct client uploads from mobile app
+- Audio files stored with pattern: `audio/{uuid}-{filename}`
 
-**Status:** Not yet configured
+**Implementation:**
+- Backend: `backend/src/services/s3Service.ts`
+- Uses AWS SDK v3 (@aws-sdk/client-s3, @aws-sdk/s3-request-presigner)
+- Mobile: AudioRecorder uploads via presigned URLs
+
+**Status:** ✅ Implemented (MVP - direct uploads without CDN)
 
 ### Database
 

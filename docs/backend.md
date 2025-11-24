@@ -52,6 +52,10 @@ Forms a tree structure where each node can have multiple children.
 
 ## API Endpoints
 
+### Audio Endpoints
+
+> **Note:** Audio upload endpoints are in progress.
+
 ### Planned Endpoints
 
 - `POST /api/start` - Create a new root audio node
@@ -63,6 +67,15 @@ Forms a tree structure where each node can have multiple children.
 
 ## Services Layer
 
+### s3Service.ts ✅ Implemented
+
+S3 presigned URL generation for direct client uploads:
+- `generateUploadUrl(filename)` - Generate presigned S3 upload URL with unique key
+- `generateDownloadUrl(key)` - Generate presigned S3 download URL
+- Uses AWS SDK v3 (@aws-sdk/client-s3, @aws-sdk/s3-request-presigner)
+- 1-hour expiration on presigned URLs
+- Audio files stored with pattern: `audio/{uuid}-{filename}`
+
 ### audioProcessor.ts
 
 Pure audio processing functions designed for future Lambda migration:
@@ -70,16 +83,13 @@ Pure audio processing functions designed for future Lambda migration:
 - `validateAudio(audio)` - Validate format and duration
 - `getAudioMetadata(audio)` - Extract audio metadata
 
-### storageService.ts
-
-S3/Cloudflare R2 operations:
-- Upload audio files
-- Generate signed URLs
-- Delete old files
+> **Note:** Not yet implemented.
 
 ### audioService.ts
 
 Orchestration layer coordinating audio processing and storage.
+
+> **Note:** Not yet implemented.
 
 ## Audio Processing
 
@@ -99,7 +109,9 @@ See `backend/.env.example` for required configuration:
 DATABASE_URL=              # PostgreSQL connection
 AWS_ACCESS_KEY_ID=         # S3/R2 credentials
 AWS_SECRET_ACCESS_KEY=
-S3_BUCKET_NAME=
+AWS_REGION=                # AWS region (e.g., us-east-1)
+AWS_S3_BUCKET=             # S3 bucket name for audio storage
+S3_BUCKET_NAME=            # Alternative bucket name (for compatibility)
 PORT=3000
 ```
 
@@ -119,6 +131,7 @@ npm run db:query         # Open Prisma Studio
 Tests are located in `__tests__/` directories alongside source files.
 
 Current test coverage:
+- ✅ S3 service (presigned URL generation)
 - Audio validation utilities (shared package)
 - FFmpeg utilities (placeholder)
 

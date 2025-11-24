@@ -15,11 +15,12 @@ mobile/
 │   ├── index.tsx           # Home screen
 │   └── record.tsx          # Recording interface (planned)
 ├── services/
+│   ├── audioService.ts     # ✅ Audio recording service (implemented)
+│   ├── duetPlayer.ts       # ✅ Duet playback with audio chaining (implemented)
 │   ├── audio/
 │   │   ├── AudioRecorderInterface.ts    # Abstract interface
 │   │   ├── ExpoAudioRecorder.ts         # Expo-av implementation
 │   │   └── AudioRecorderFactory.ts      # Returns correct implementation
-│   ├── audioPlayer.ts      # Playback management (planned)
 │   └── api.ts              # Backend API client (planned)
 ├── components/             # Reusable UI components
 │   ├── RecordButton.tsx    # Recording control (planned)
@@ -41,26 +42,44 @@ mobile/
 
 ## Audio Architecture
 
-### Recording Abstraction
+### Audio Recording ✅ Implemented
 
-The mobile app uses an interface pattern for audio recording to enable future native module integration:
+**AudioRecorder class** (`services/audioService.ts`):
+- Handles audio recording permissions and initialization
+- Records audio using expo-av with platform-specific configurations
+- Uploads recordings to S3 via presigned URLs
+- Manages recording lifecycle and cleanup
 
-```typescript
-interface AudioRecorder {
-  initialize(): Promise<void>
-  startRecording(): Promise<void>
-  stopRecording(): Promise<AudioBuffer>
-  pauseRecording(): Promise<void>
-  resumeRecording(): Promise<void>
-  getRecordingStatus(): RecordingStatus
-}
-```
+Key methods:
+- `init()` - Request permissions and configure audio mode
+- `startRecording()` / `stopRecording()` - Control recording
+- `uploadRecording(uri, apiUrl)` - Upload to S3
+- `cleanup()` - Release audio resources
 
-This abstraction allows swapping between:
+Platform support:
+- iOS: `.m4a` (MPEG4AAC format)
+- Android: `.webm` (WEBM format)
+- Web: `.webm` (128kbps)
+
+### Duet Playback ✅ Implemented
+
+**DuetPlayer class** (`services/duetPlayer.ts`):
+- Chains audio segments for sequential playback
+- Supports playing from any position in the audio chain
+- Manages multiple Audio.Sound instances
+- Calculates cumulative timing for segments
+
+Key methods:
+- `loadChain(chain)` - Load audio node chain
+- `playFrom(position)` - Start playback from specific time
+- `getCurrentPosition()` - Track playback position
+- `getRecordingStartPoint()` - Determine where next recording should start
+
+### Recording Abstraction (Planned)
+
+The mobile app will use an interface pattern for audio recording to enable future native module integration. This will allow swapping between:
 - **expo-av** (current) - Expo's managed audio implementation
 - **Native modules** (future) - Custom Swift/Kotlin implementations for better performance
-
-Components only interact with the interface, making implementation changes transparent.
 
 ## Planned Features
 
