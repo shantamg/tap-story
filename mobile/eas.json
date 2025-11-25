@@ -43,6 +43,9 @@
       },
       "ios": {
         "buildArtifactPaths": ["ios/build/*"]
+      },
+      "android": {
+        "buildType": "apk"
       }
     }
   },
