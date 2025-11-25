@@ -6,74 +6,178 @@ interface AudioSegment {
   audioUrl: string;       // Remote S3 presigned URL
   localUri?: string;      // Local file URI (if available)
   duration: number;
-  startTime?: number;
+  startTime: number;      // When this segment starts in the timeline
   sound?: Audio.Sound;
 }
 
+let instanceCounter = 0;
+
 export class DuetPlayer {
   private segments: AudioSegment[] = [];
-  private currentSegmentIndex = 0;
-  private playbackStartTime = 0;
   private isPlaying = false;
+  private instanceId: number;
+  private playbackStartTime = 0;      // When playback started (Date.now())
+  private timelinePosition = 0;       // Current position in timeline (seconds)
+  private positionUpdateInterval: NodeJS.Timeout | null = null;
+  private startedSegments: Set<string> = new Set();  // Track which segments we've started
 
-  async loadChain(chain: Array<{ id: string; audioUrl: string; localUri?: string; duration: number }>): Promise<void> {
+  constructor() {
+    this.instanceId = ++instanceCounter;
+    this.log('Instance created');
+  }
+
+  private log(...args: any[]) {
+    console.log(`[DuetPlayer #${this.instanceId}]`, ...args);
+  }
+
+  async loadChain(chain: Array<{ id: string; audioUrl: string; localUri?: string; duration: number; startTime: number }>): Promise<void> {
+    this.log('loadChain called with', chain.length, 'segments');
+
     // Clean up existing sounds
     await this.cleanup();
 
-    let cumulativeTime = 0;
-    this.segments = chain.map(node => {
-      const segment: AudioSegment = {
-        id: node.id,
-        audioUrl: node.audioUrl,
-        localUri: node.localUri,
-        startTime: cumulativeTime,
-        duration: node.duration,
-      };
-      cumulativeTime += node.duration;
-      return segment;
-    });
+    // Store segments with their timeline positions
+    this.segments = chain.map(node => ({
+      id: node.id,
+      audioUrl: node.audioUrl,
+      localUri: node.localUri,
+      duration: node.duration,
+      startTime: node.startTime,
+    }));
+
+    // Log the timeline
+    for (const seg of this.segments) {
+      this.log(`Segment ${seg.id.slice(0, 8)}: starts at ${seg.startTime}s, duration ${seg.duration}s, ends at ${seg.startTime + seg.duration}s`);
+    }
+
+    // Preload all sounds
+    this.log('Preloading all sounds...');
+    for (const segment of this.segments) {
+      const uri = await this.getPlaybackUri(segment);
+      this.log('Preloading segment', segment.id.slice(0, 8));
+      const { sound } = await Audio.Sound.createAsync(
+        { uri },
+        { shouldPlay: false }
+      );
+      segment.sound = sound;
+    }
+    this.log('All sounds preloaded');
   }
 
   getTotalDuration(): number {
-    return this.segments.reduce((sum, seg) => sum + seg.duration, 0);
+    if (this.segments.length === 0) return 0;
+    // Total duration is the latest end time
+    return Math.max(...this.segments.map(seg => seg.startTime + seg.duration));
   }
 
-  async playFrom(position: number): Promise<void> {
-    this.playbackStartTime = position;
+  /**
+   * Play the chain from a position, with optional callback when reaching a specific time
+   * @param position - Timeline position to start from (seconds)
+   * @param callbackTime - Optional time to trigger the callback (seconds)
+   * @param onReachTime - Callback to trigger when reaching callbackTime
+   */
+  async playFrom(position: number, callbackTime?: number, onReachTime?: () => void): Promise<void> {
+    this.log('playFrom called, position:', position, 'callbackTime:', callbackTime);
+    this.isPlaying = true;
+    this.timelinePosition = position;
+    this.playbackStartTime = Date.now();
+    this.startedSegments.clear();
 
-    // Find which segment to start from
-    let segmentIndex = 0;
-    let segmentStartPosition = 0;
+    let callbackTriggered = false;
 
-    for (let i = 0; i < this.segments.length; i++) {
-      const segment = this.segments[i];
-      if (position < (segment.startTime! + segment.duration)) {
-        segmentIndex = i;
-        segmentStartPosition = position - segment.startTime!;
-        break;
+    // Start all segments that should be playing at this position
+    for (const segment of this.segments) {
+      const segmentEnd = segment.startTime + segment.duration;
+
+      // Should this segment be playing at the current position?
+      if (segment.startTime <= position && segmentEnd > position) {
+        // Calculate position within this segment
+        const segmentPosition = position - segment.startTime;
+        this.log(`Starting segment ${segment.id.slice(0, 8)} at position ${segmentPosition}s`);
+
+        if (segment.sound) {
+          await segment.sound.setPositionAsync(segmentPosition * 1000);
+          await segment.sound.playAsync();
+          this.startedSegments.add(segment.id);
+        }
       }
     }
 
-    this.currentSegmentIndex = segmentIndex;
-    await this.playSegmentChain(segmentIndex, segmentStartPosition);
+    // Set up position tracking and segment triggering
+    this.positionUpdateInterval = setInterval(async () => {
+      if (!this.isPlaying) {
+        if (this.positionUpdateInterval) {
+          clearInterval(this.positionUpdateInterval);
+          this.positionUpdateInterval = null;
+        }
+        return;
+      }
+
+      // Calculate current timeline position
+      const elapsedMs = Date.now() - this.playbackStartTime;
+      this.timelinePosition = position + (elapsedMs / 1000);
+
+      // Check if we need to trigger the callback
+      if (callbackTime !== undefined && onReachTime && !callbackTriggered) {
+        if (this.timelinePosition >= callbackTime) {
+          this.log('Reached callback time:', callbackTime);
+          callbackTriggered = true;
+          onReachTime();
+        }
+      }
+
+      // Check if we need to start any segments that haven't been started yet
+      for (const segment of this.segments) {
+        // Skip if we've already started this segment
+        if (this.startedSegments.has(segment.id)) continue;
+        if (!segment.sound) continue;
+
+        const segmentEnd = segment.startTime + segment.duration;
+
+        // Should this segment start now?
+        if (segment.startTime <= this.timelinePosition && segmentEnd > this.timelinePosition) {
+          // Mark as started BEFORE async operations to prevent duplicate starts
+          this.startedSegments.add(segment.id);
+
+          // Calculate position within this segment
+          const segmentPosition = this.timelinePosition - segment.startTime;
+          this.log(`Starting segment ${segment.id.slice(0, 8)} at timeline position ${this.timelinePosition.toFixed(1)}s (segment position ${segmentPosition.toFixed(1)}s)`);
+
+          try {
+            await segment.sound.setPositionAsync(segmentPosition * 1000);
+            await segment.sound.playAsync();
+          } catch (error) {
+            this.log(`Error starting segment ${segment.id.slice(0, 8)}:`, error);
+          }
+        }
+      }
+
+      // Check if all segments are done
+      const totalDuration = this.getTotalDuration();
+      if (this.timelinePosition >= totalDuration) {
+        this.log('Reached end of timeline');
+        this.isPlaying = false;
+        if (this.positionUpdateInterval) {
+          clearInterval(this.positionUpdateInterval);
+          this.positionUpdateInterval = null;
+        }
+      }
+    }, 50); // Check every 50ms for smooth triggering
   }
 
   /**
    * Get the best URI to use for playback - local if available, otherwise remote
    */
   private async getPlaybackUri(segment: AudioSegment): Promise<string> {
-    // If we have a local URI passed in, use it
     if (segment.localUri) {
       return segment.localUri;
     }
 
-    // Check if we have it cached locally
     const hasLocal = await localAudioExists(segment.id);
     if (hasLocal) {
       return getLocalAudioPath(segment.id);
     }
 
-    // Fall back to remote URL (and cache it for next time)
     try {
       const localPath = await downloadAndCacheAudio(segment.audioUrl, segment.id);
       return localPath;
@@ -83,92 +187,46 @@ export class DuetPlayer {
     }
   }
 
-  private async playSegmentChain(startIndex: number, startPosition: number): Promise<void> {
-    this.isPlaying = true;
-
-    for (let i = startIndex; i < this.segments.length && this.isPlaying; i++) {
-      const segment = this.segments[i];
-
-      // Get the best URI (local preferred, remote fallback)
-      const uri = await this.getPlaybackUri(segment);
-
-      // Load the audio
-      const { sound } = await Audio.Sound.createAsync(
-        { uri },
-        {
-          shouldPlay: true,
-          positionMillis: i === startIndex ? startPosition * 1000 : 0,
-        }
-      );
-
-      segment.sound = sound;
-
-      // Set up completion listener for chaining
-      sound.setOnPlaybackStatusUpdate((status: AVPlaybackStatus) => {
-        if (status.isLoaded && status.didJustFinish) {
-          // Move to next segment
-          if (i < this.segments.length - 1) {
-            this.currentSegmentIndex = i + 1;
-          }
-        }
-      });
-
-      // Wait for this segment to complete
-      await new Promise<void>((resolve) => {
-        const checkInterval = setInterval(async () => {
-          const status = await sound.getStatusAsync();
-          if (status.isLoaded && (status.didJustFinish || !this.isPlaying)) {
-            clearInterval(checkInterval);
-            resolve();
-          }
-        }, 100);
-      });
-    }
-
-    this.isPlaying = false;
-  }
-
   async getCurrentPosition(): Promise<number> {
-    if (this.currentSegmentIndex >= this.segments.length) {
-      return this.getTotalDuration();
-    }
-
-    const currentSegment = this.segments[this.currentSegmentIndex];
-    if (currentSegment.sound) {
-      const status = await currentSegment.sound.getStatusAsync();
-      if (status.isLoaded) {
-        return currentSegment.startTime! + (status.positionMillis / 1000);
-      }
-    }
-
-    return currentSegment.startTime || 0;
+    return this.timelinePosition;
   }
 
   async stop(): Promise<void> {
+    this.log('stop called');
     this.isPlaying = false;
+
+    if (this.positionUpdateInterval) {
+      clearInterval(this.positionUpdateInterval);
+      this.positionUpdateInterval = null;
+    }
 
     for (const segment of this.segments) {
       if (segment.sound) {
-        await segment.sound.stopAsync();
+        try {
+          await segment.sound.stopAsync();
+        } catch (error) {
+          this.log('Error stopping sound:', error);
+        }
       }
     }
   }
 
   async cleanup(): Promise<void> {
+    this.log('cleanup called');
     await this.stop();
 
     for (const segment of this.segments) {
       if (segment.sound) {
-        await segment.sound.unloadAsync();
+        try {
+          await segment.sound.unloadAsync();
+        } catch (error) {
+          this.log('Error unloading sound:', error);
+        }
         segment.sound = undefined;
       }
     }
 
     this.segments = [];
-  }
-
-  getRecordingStartPoint(): number {
-    // Return where the next recording should start (after all current segments)
-    return this.getTotalDuration();
+    this.startedSegments.clear();
   }
 }
