@@ -194,6 +194,10 @@ export class AudioRecorder {
         body: JSON.stringify({ filename, contentType }),
       });
 
+      if (!uploadUrlResponse.ok) {
+        throw new Error(`Failed to get upload URL: ${uploadUrlResponse.status}`);
+      }
+
       const { uploadUrl, key } = await uploadUrlResponse.json();
 
       // Upload file to S3

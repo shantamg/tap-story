@@ -5,21 +5,22 @@ import { Platform } from 'react-native';
  * Get the API URL for the backend server.
  *
  * Resolution order:
- * 1. EXPO_PUBLIC_API_URL from build config (Constants.expoConfig.extra)
- * 2. EXPO_PUBLIC_API_URL from process.env (.env file)
+ * 1. EXPO_PUBLIC_API_URL from process.env (inlined at build time by Expo)
+ * 2. EXPO_PUBLIC_API_URL from Constants.expoConfig.extra (dev client fallback)
  * 3. Platform-specific fallbacks (localhost for web/iOS, warning for Android)
  */
 export function getApiUrl(): string {
-  // Check build config first (from app.config.js)
-  const configApiUrl = Constants.expoConfig?.extra?.EXPO_PUBLIC_API_URL;
-  if (configApiUrl) {
-    return configApiUrl;
-  }
-
-  // Check environment variable (from .env file)
+  // EXPO_PUBLIC_ vars are inlined at build time by Expo's babel plugin
+  // Check this FIRST since it's the most reliable for production builds
   const envApiUrl = process.env.EXPO_PUBLIC_API_URL;
   if (envApiUrl) {
     return envApiUrl;
+  }
+
+  // Fallback to Constants.expoConfig for development client
+  const configApiUrl = Constants.expoConfig?.extra?.EXPO_PUBLIC_API_URL;
+  if (configApiUrl) {
+    return configApiUrl;
   }
 
   // Platform-specific fallbacks
