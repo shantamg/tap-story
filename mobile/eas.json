@@ -39,7 +39,7 @@
     },
     "production": {
       "env": {
-        "EXPO_PUBLIC_API_URL": "https://api.tapstory.app"
+        "EXPO_PUBLIC_API_URL": "https://tap-story-api.onrender.com"
       },
       "ios": {
         "buildArtifactPaths": ["ios/build/*"]

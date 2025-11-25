@@ -26,7 +26,7 @@
     "deploy:mobile:android": "cd mobile && eas build --platform android",
     "clean": "npm run clean --workspaces --if-present",
     "reset": "./scripts/reset-all.sh",
-    "postinstall": "patch-package"
+    "postinstall": "npx --no patch-package || true"
   },
   "devDependencies": {
     "typescript": "^5.3.3"
