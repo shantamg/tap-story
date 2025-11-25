@@ -8,14 +8,14 @@
       "developmentClient": true,
       "distribution": "internal",
       "env": {
-        "EXPO_PUBLIC_API_URL": "http://localhost:3000"
+        "EXPO_PUBLIC_API_URL": "http://localhost:3000",
+        "APP_VARIANT": "development"
       },
       "ios": {
         "buildArtifactPaths": ["ios/build/*"]
       },
       "android": {
-        "buildType": "apk",
-        "applicationId": "com.tapstory.app.dev"
+        "buildType": "apk"
       }
     },
     "development-simulator": {
