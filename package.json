@@ -10,6 +10,7 @@
   "scripts": {
     "dev:api": "npm run dev --workspace=backend",
     "dev:mobile": "npm run start --workspace=mobile",
+    "dev:mobile:clear": "npm run start:clear --workspace=mobile",
     "build": "npm run build --workspace=shared && npm run build --workspace=backend",
     "build:mobile": "npm run build --workspace=mobile",
     "test": "npm run test --workspace=shared && npm run test --workspace=backend",
@@ -28,5 +29,13 @@
   },
   "devDependencies": {
     "typescript": "^5.3.3"
+  },
+  "overrides": {
+    "react": "19.1.0",
+    "react-dom": "19.1.0"
+  },
+  "dependencies": {
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0"
   }
 }

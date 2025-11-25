@@ -2,6 +2,7 @@ import express from 'express';
 import cors from 'cors';
 import bodyParser from 'body-parser';
 import dotenv from 'dotenv';
+import audioRoutes from './routes/audioRoutes';
 
 dotenv.config();
 
@@ -17,6 +18,9 @@ app.use(bodyParser.urlencoded({ extended: true }));
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
+
+// Routes
+app.use('/api/audio', audioRoutes);
 
 // Start server
 app.listen(PORT, () => {
