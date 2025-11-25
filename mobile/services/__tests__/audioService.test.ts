@@ -37,11 +37,31 @@ describe('AudioRecorder', () => {
 
   it('should start and stop recording', async () => {
     await recorder.init();
-    await recorder.startRecording();
+    const startTimestamp = await recorder.startRecording();
     expect(recorder.isRecording()).toBe(true);
+    expect(typeof startTimestamp).toBe('number');
+    expect(startTimestamp).toBeGreaterThan(0);
 
     const uri = await recorder.stopRecording();
     expect(uri).toBeTruthy();
     expect(recorder.isRecording()).toBe(false);
+  });
+
+  it('should measure start latency', async () => {
+    await recorder.init();
+    await recorder.startRecording();
+    const latency = recorder.getLastStartLatency();
+    expect(typeof latency).toBe('number');
+    expect(latency).toBeGreaterThanOrEqual(0);
+    await recorder.stopRecording();
+  });
+
+  it('should pre-prepare recording for faster start', async () => {
+    await recorder.init();
+    await recorder.prepareRecording();
+    const startTimestamp = await recorder.startRecording();
+    expect(recorder.isRecording()).toBe(true);
+    expect(startTimestamp).toBeGreaterThan(0);
+    await recorder.stopRecording();
   });
 });
