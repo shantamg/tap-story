@@ -1,0 +1,15 @@
+{
+  "expo": {
+    "extra": {
+      "eas": {
+        "projectId": "b8c0ffa1-3665-4c85-9c9b-497860506502"
+      }
+    },
+    "ios": {
+      "bundleIdentifier": "com.shantamg.tapstory",
+      "infoPlist": {
+        "ITSAppUsesNonExemptEncryption": false
+      }
+    }
+  }
+}
