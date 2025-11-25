@@ -25,6 +25,7 @@ interface AudioTimelineProps {
   onSeekPreview?: (position: number) => void;  // Callback during drag for visual feedback only
   previewTimelinePosition?: number | null; // Visual preview position during dragging
   processingSegmentIds?: Set<string>; // IDs of segments currently being uploaded/processed
+  downloadingSegmentIds?: Set<string>; // IDs of segments currently being downloaded
 }
 
 const MIN_WIDTH_PX = 30; // Minimum segment width in pixels
@@ -41,6 +42,7 @@ export function AudioTimeline({
   onSeekPreview,
   previewTimelinePosition = null,
   processingSegmentIds = new Set(),
+  downloadingSegmentIds = new Set(),
 }: AudioTimelineProps) {
   const [containerWidth, setContainerWidth] = useState(300);
   const [zoomScale, setZoomScale] = useState(1); // 1 = auto-fit, >1 = zoomed in
@@ -257,6 +259,7 @@ export function AudioTimeline({
     onSegmentTap,
     recordingDuration,
     isProcessing,
+    isDownloading,
   }: {
     segment: AudioSegment;
     index: number;
@@ -267,6 +270,7 @@ export function AudioTimeline({
     onSegmentTap?: (segment: AudioSegment) => void;
     recordingDuration: number;
     isProcessing: boolean;
+    isDownloading: boolean;
   }) => {
     // Animated values for glow effect
     const glowOpacity = useSharedValue(isPlaying ? 1 : 0);
@@ -280,10 +284,15 @@ export function AudioTimeline({
 
     // Animated style for the segment
     const animatedStyle = useAnimatedStyle(() => {
-      // If processing, use orange/yellow color; otherwise use purple
-      const baseColor = isProcessing 
-        ? ['rgba(255, 149, 0, 0.7)', 'rgba(255, 204, 0, 0.9)'] // Orange to yellow for processing
-        : ['rgba(88, 28, 135, 0.85)', 'rgba(147, 51, 234, 1.0)']; // Dark purple to bright purple
+      // Priority: downloading > processing > normal
+      let baseColor;
+      if (isDownloading) {
+        baseColor = ['rgba(136, 136, 136, 0.5)', 'rgba(136, 136, 136, 0.5)']; // Gray for downloading
+      } else if (isProcessing) {
+        baseColor = ['rgba(255, 149, 0, 0.7)', 'rgba(255, 204, 0, 0.9)']; // Orange to yellow for processing
+      } else {
+        baseColor = ['rgba(88, 28, 135, 0.85)', 'rgba(147, 51, 234, 1.0)']; // Dark purple to bright purple
+      }
       
       const backgroundColor = interpolateColor(
         brightness.value,
@@ -308,6 +317,7 @@ export function AudioTimeline({
       },
       isRecordingSegment && styles.recordingSegment,
       isProcessing && styles.processingSegment,
+      isDownloading && styles.downloadingSegment,
     ];
 
     const SegmentComponent = isRecordingSegment ? View : TouchableOpacity;
@@ -353,6 +363,7 @@ export function AudioTimeline({
     const left = timeToLeft(segment.startTime);
     const playing = !isRecordingSegment && isSegmentPlaying(segment);
     const isProcessing = processingSegmentIds.has(segment.id);
+    const isDownloading = downloadingSegmentIds.has(segment.id);
 
     return (
       <AnimatedSegment
@@ -366,6 +377,7 @@ export function AudioTimeline({
         onSegmentTap={onSegmentTap}
         recordingDuration={recordingDuration}
         isProcessing={isProcessing}
+        isDownloading={isDownloading}
       />
     );
   };
@@ -525,6 +537,13 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: colors.waiting, // Orange border for processing
     borderStyle: 'dashed', // Dashed border to indicate processing
+  },
+  downloadingSegment: {
+    backgroundColor: '#888',
+    opacity: 0.5,
+    borderWidth: 1,
+    borderColor: '#666',
+    borderStyle: 'dashed',
   },
   zoomHint: {
     textAlign: 'center',
