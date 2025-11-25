@@ -2,10 +2,33 @@ import { Audio } from 'expo-av';
 import { Platform } from 'react-native';
 import { getApiUrl } from '../utils/api';
 
+// Recording preset configuration
+const RECORDING_OPTIONS = {
+  android: {
+    extension: '.webm',
+    outputFormat: Audio.AndroidOutputFormat.WEBM,
+    audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
+  },
+  ios: {
+    extension: '.m4a',
+    outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
+    audioQuality: Audio.IOSAudioQuality.HIGH,
+    sampleRate: 44100,
+    numberOfChannels: 2,
+    bitRate: 128000,
+  },
+  web: {
+    mimeType: 'audio/webm',
+    bitsPerSecond: 128000,
+  },
+};
+
 export class AudioRecorder {
   private recording: Audio.Recording | null = null;
+  private preparedRecording: Audio.Recording | null = null;  // Pre-prepared recording
   private sound: Audio.Sound | null = null;
   private ready = false;
+  private lastStartLatency = 0;  // Track measured latency
 
   async init(): Promise<void> {
     try {
@@ -35,35 +58,91 @@ export class AudioRecorder {
     return this.recording !== null;
   }
 
-  async startRecording(): Promise<void> {
+  /**
+   * Get the latency from the last recording start (in seconds)
+   * This can be used to adjust the startTime of the recorded segment
+   */
+  getLastStartLatency(): number {
+    return this.lastStartLatency;
+  }
+
+  /**
+   * Pre-prepare a recording so startRecording() is faster
+   * Call this ahead of time when you know recording will happen soon
+   */
+  async prepareRecording(): Promise<void> {
     if (!this.ready) {
       throw new Error('AudioRecorder not initialized');
     }
 
+    // Clean up any existing prepared recording
+    if (this.preparedRecording) {
+      try {
+        await this.preparedRecording.stopAndUnloadAsync();
+      } catch (e) {
+        // Ignore
+      }
+      this.preparedRecording = null;
+    }
+
     try {
+      console.log('[AudioRecorder] Pre-preparing recording...');
+      const prepareStart = Date.now();
+      
+      this.preparedRecording = new Audio.Recording();
+      await this.preparedRecording.prepareToRecordAsync(RECORDING_OPTIONS);
+      
+      const prepareTime = Date.now() - prepareStart;
+      console.log(`[AudioRecorder] Recording prepared in ${prepareTime}ms`);
+    } catch (error) {
+      console.error('[AudioRecorder] Failed to prepare recording:', error);
+      this.preparedRecording = null;
+      throw error;
+    }
+  }
+
+  /**
+   * Start recording. If prepareRecording() was called, this will be much faster.
+   * Returns the timestamp when recording actually started (after any latency).
+   */
+  async startRecording(): Promise<number> {
+    if (!this.ready) {
+      throw new Error('AudioRecorder not initialized');
+    }
+
+    const overallStart = Date.now();
+
+    try {
+      // Use pre-prepared recording if available
+      if (this.preparedRecording) {
+        console.log('[AudioRecorder] Using pre-prepared recording');
+        this.recording = this.preparedRecording;
+        this.preparedRecording = null;
+        
+        const startTime = Date.now();
+        await this.recording.startAsync();
+        const actualStartTime = Date.now();
+        
+        this.lastStartLatency = (actualStartTime - overallStart) / 1000;
+        console.log(`[AudioRecorder] Recording started (pre-prepared), latency: ${this.lastStartLatency * 1000}ms`);
+        
+        return actualStartTime;
+      }
+
+      // Fall back to creating new recording
+      console.log('[AudioRecorder] Creating new recording (not pre-prepared)');
       this.recording = new Audio.Recording();
 
-      await this.recording.prepareToRecordAsync({
-        android: {
-          extension: '.webm',
-          outputFormat: Audio.AndroidOutputFormat.WEBM,
-          audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
-        },
-        ios: {
-          extension: '.m4a',
-          outputFormat: Audio.IOSOutputFormat.MPEG4AAC,
-          audioQuality: Audio.IOSAudioQuality.HIGH,
-          sampleRate: 44100,
-          numberOfChannels: 2,
-          bitRate: 128000,
-        },
-        web: {
-          mimeType: 'audio/webm',
-          bitsPerSecond: 128000,
-        },
-      });
+      await this.recording.prepareToRecordAsync(RECORDING_OPTIONS);
 
+      const startTime = Date.now();
       await this.recording.startAsync();
+      const actualStartTime = Date.now();
+      
+      this.lastStartLatency = (actualStartTime - overallStart) / 1000;
+      console.log(`[AudioRecorder] Recording started (fresh), latency: ${this.lastStartLatency * 1000}ms`);
+      
+      return actualStartTime;
     } catch (error) {
       console.error('Failed to start recording:', error);
       this.recording = null;

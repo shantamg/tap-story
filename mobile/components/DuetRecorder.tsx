@@ -201,19 +201,34 @@ export function DuetRecorder() {
     return nextToMostRecentEndTime;
   }
 
+  // Pre-roll: start recording this many seconds BEFORE the target punch-in point
+  // This ensures we capture audio before and after the transition for cross-fading
+  const RECORDING_PRE_ROLL_SECONDS = 1.0;
+
   async function startDuetRecording() {
     try {
       setIsLoading(true);
       console.log('[DuetRecorder] Starting duet recording, chain length:', audioChain.length);
 
-      // Calculate when this recording will start in the timeline
-      recordingStartTimeInChain.current = getNextRecordingStartTime();
-      console.log('[DuetRecorder] This recording will start at timeline position:', recordingStartTimeInChain.current);
+      // Calculate the "logical" start time (where the new track conceptually begins)
+      const logicalStartTime = getNextRecordingStartTime();
+      
+      // Actual recording starts PRE_ROLL seconds earlier to capture lead-in audio
+      // This gives us buffer for cross-fading and absorbs any startup latency
+      const actualRecordingStartTime = Math.max(0, logicalStartTime - RECORDING_PRE_ROLL_SECONDS);
+      recordingStartTimeInChain.current = actualRecordingStartTime;
+      
+      console.log('[DuetRecorder] Logical start time:', logicalStartTime);
+      console.log('[DuetRecorder] Actual recording starts at:', actualRecordingStartTime, `(${RECORDING_PRE_ROLL_SECONDS}s pre-roll)`);
 
       // If we have a chain, start or continue playback
       if (audioChain.length > 0) {
         console.log('[DuetRecorder] Loading chain for playback:', audioChain.map(n => ({ id: n.id, duration: n.duration, startTime: n.startTime })));
         await player.current.loadChain(audioChain);
+
+        // Pre-prepare the recording so it starts faster when we need it
+        console.log('[DuetRecorder] Pre-preparing recording for faster start');
+        await recorder.current.prepareRecording();
 
         // If not already playing, start playback from current position or beginning
         if (!isPlaying) {
@@ -225,11 +240,11 @@ export function DuetRecorder() {
           setIsWaitingToRecord(true);
           setIsLoading(false);
 
-          // Start playback from beginning
+          // Start playback from beginning, trigger recording at the ACTUAL start time (with pre-roll)
           console.log('[DuetRecorder] Starting playback from 0');
-          player.current.playFrom(0, recordingStartTimeInChain.current, () => {
-            // Callback when it's time to start recording
-            console.log('[DuetRecorder] Reached recording start point, beginning recording');
+          player.current.playFrom(0, actualRecordingStartTime, () => {
+            // Callback when it's time to start recording (1 second before logical start)
+            console.log('[DuetRecorder] Reached pre-roll point, beginning recording');
             setIsWaitingToRecord(false);
             actuallyStartRecording();
           });
@@ -239,12 +254,13 @@ export function DuetRecorder() {
           setIsWaitingToRecord(true);
           setIsLoading(false);
           
-          // Check if we're already past the recording start time
-          if (currentPosition >= recordingStartTimeInChain.current) {
+          // Check if we're already past the recording start time (with pre-roll)
+          if (currentPosition >= actualRecordingStartTime) {
             // Already past, start recording immediately
             setIsWaitingToRecord(false);
             await actuallyStartRecording();
           } else {
+            // Pre-prepare the recording while we wait
             // Set up callback for when we reach the recording start time
             // The position tracking will check and trigger recording
             // We'll handle this in the position tracking interval
@@ -264,13 +280,28 @@ export function DuetRecorder() {
 
   async function actuallyStartRecording() {
     try {
-      // Record the start timestamp to calculate duration
-      recordingStartTimestamp.current = Date.now();
+      // Get the current playback position - this is where the recording actually starts
+      // Since we have pre-roll, any startup latency is absorbed by the buffer
+      const playbackPosition = await player.current.getCurrentPosition();
+      
+      // Start recording - this returns the actual timestamp when recording began
+      console.log('[DuetRecorder] Calling recorder.startRecording()');
+      const actualStartTimestamp = await recorder.current.startRecording();
+      
+      // Log the latency for debugging
+      const latencySeconds = recorder.current.getLastStartLatency();
+      console.log(`[DuetRecorder] Recording started with latency: ${(latencySeconds * 1000).toFixed(0)}ms`);
+      
+      // Update the recording start time to reflect the actual playback position when recording started
+      // This accounts for any latency - the pre-roll absorbs it, but we track the real position
+      const adjustedStartTime = playbackPosition + latencySeconds;
+      recordingStartTimeInChain.current = adjustedStartTime;
+      console.log(`[DuetRecorder] Recording aligned to timeline position: ${adjustedStartTime.toFixed(2)}s`);
+      
+      // Use the actual start timestamp for duration calculation
+      recordingStartTimestamp.current = actualStartTimestamp;
       console.log('[DuetRecorder] Recording start timestamp:', recordingStartTimestamp.current);
 
-      // Start recording
-      console.log('[DuetRecorder] Calling recorder.startRecording()');
-      await recorder.current.startRecording();
       console.log('[DuetRecorder] Recording started successfully');
       setIsRecording(true);
       setRecordingDuration(0);
@@ -416,6 +447,14 @@ export function DuetRecorder() {
       stopPositionTracking();
       setCurrentPosition(0);
       setSeekPreviewPosition(null);
+    }
+  }
+
+  async function handleStopButton() {
+    if (isRecording) {
+      await stopDuetRecording();
+    } else {
+      await stopPlayback();
     }
   }
 
@@ -656,7 +695,7 @@ export function DuetRecorder() {
         isLoading={isLoading}
         hasAudio={audioChain.length > 0}
         onPlay={playFromPlayhead}
-        onStop={stopPlayback}
+        onStop={handleStopButton}
         onRecord={handleRecordPress}
         onRewind={handleRewind}
         onFastForward={handleFastForward}

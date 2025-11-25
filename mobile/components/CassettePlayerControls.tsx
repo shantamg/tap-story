@@ -38,12 +38,12 @@ export function CassettePlayerControls({
         <DoubleTriangle direction="left" />
       </TouchableOpacity>
 
-      {/* Stop button (Square) - only show when playing */}
-      {isPlaying && (
+      {/* Stop button (Square) - show when playing or recording */}
+      {(isPlaying || isRecording) && (
         <TouchableOpacity
           style={[styles.button, styles.stopButton]}
           onPress={onStop}
-          disabled={isLoading || isRecording}
+          disabled={isLoading}
         >
           <View style={styles.square} />
         </TouchableOpacity>
