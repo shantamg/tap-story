@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
-import { generateUploadUrl, generateDownloadUrl } from '../services/s3Service';
+import { generateUploadUrl, generateDownloadUrl, deleteAudioFile } from '../services/s3Service';
+import { measureLatencyMsForKeys } from '../utils/latencyCalibration';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -169,6 +170,103 @@ router.get('/tree/:id', async (req: Request, res: Response) => {
   } catch (error) {
     console.error('Get tree error:', error);
     res.status(500).json({ error: 'Failed to get audio tree' });
+  }
+});
+
+// Calibrate latency between two audio nodes (reference and test)
+router.post('/calibrate', async (req: Request, res: Response) => {
+  try {
+    const { referenceNodeId, testNodeId } = req.body as {
+      referenceNodeId?: string;
+      testNodeId?: string;
+    };
+
+    if (!referenceNodeId || !testNodeId) {
+      return res.status(400).json({ error: 'referenceNodeId and testNodeId are required' });
+    }
+
+    const referenceNode = await prisma.audioNode.findUnique({
+      where: { id: referenceNodeId },
+      select: { id: true, audioUrl: true },
+    });
+
+    const testNode = await prisma.audioNode.findUnique({
+      where: { id: testNodeId },
+      select: { id: true, audioUrl: true },
+    });
+
+    if (!referenceNode || !testNode) {
+      return res.status(404).json({ error: 'Reference or test node not found' });
+    }
+
+    const offsetMs = await measureLatencyMsForKeys(referenceNode.audioUrl, testNode.audioUrl);
+
+    res.json({
+      referenceNodeId,
+      testNodeId,
+      offsetMs,
+    });
+  } catch (error) {
+    console.error('Calibrate latency error:', error);
+    res.status(500).json({ error: 'Failed to calibrate latency' });
+  }
+});
+
+// Delete a chain (all nodes in the tree) and their S3 files
+router.delete('/chain/:id', async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+
+    // Get all nodes in the chain (tree) by traversing from leaf to root
+    const nodesToDelete: Array<{ id: string; audioUrl: string }> = [];
+    let currentId: string | null = id;
+
+    while (currentId) {
+      const node = await prisma.audioNode.findUnique({
+        where: { id: currentId },
+        select: { id: true, audioUrl: true, parentId: true },
+      });
+
+      if (!node) {
+        break;
+      }
+
+      nodesToDelete.push({ id: node.id, audioUrl: node.audioUrl });
+      currentId = node.parentId;
+    }
+
+    // Delete from S3 first (before database deletion)
+    for (const node of nodesToDelete) {
+      try {
+        await deleteAudioFile(node.audioUrl);
+      } catch (s3Error) {
+        console.error(`Failed to delete S3 file ${node.audioUrl}:`, s3Error);
+        // Continue even if S3 delete fails
+      }
+    }
+
+    // Delete all nodes from database
+    // Delete from leaf to root to avoid foreign key constraint issues
+    // (though with ON DELETE SET NULL, order shouldn't matter, but being safe)
+    for (const node of nodesToDelete) {
+      try {
+        await prisma.audioNode.delete({
+          where: { id: node.id },
+        });
+      } catch (dbError) {
+        console.error(`Failed to delete database node ${node.id}:`, dbError);
+        // Continue even if one delete fails
+      }
+    }
+
+    res.json({ 
+      success: true, 
+      deletedNodes: nodesToDelete.length,
+      nodeIds: nodesToDelete.map(n => n.id)
+    });
+  } catch (error) {
+    console.error('Delete chain error:', error);
+    res.status(500).json({ error: 'Failed to delete chain' });
   }
 });
 

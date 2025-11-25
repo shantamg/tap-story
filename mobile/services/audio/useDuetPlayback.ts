@@ -8,7 +8,6 @@
  * - Recording cue callbacks
  */
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { State } from 'react-native-track-player';
 import { DuetTrackPlayer, DuetSegment } from './DuetTrackPlayer';
 import { LATENCY_OFFSET_MS } from './trackPlayerSetup';
 
@@ -83,14 +82,14 @@ export function useDuetPlayback(): UseDuetPlaybackReturn {
 
         // Check if playback ended
         const state = await player.getPlaybackState();
-        if (state === State.Stopped || state === State.Ended) {
+        if (state === 'stopped') {
           setIsPlaying(false);
           setIsPaused(false);
           stopPositionTracking();
-        } else if (state === State.Paused) {
+        } else if (state === 'paused') {
           setIsPlaying(false);
           setIsPaused(true);
-        } else if (state === State.Playing) {
+        } else if (state === 'playing') {
           setIsPlaying(true);
           setIsPaused(false);
         }

@@ -34,6 +34,11 @@ function withTrackPlayerIOS(config) {
  */
 function withTrackPlayerAndroid(config) {
   return withAndroidManifest(config, (config) => {
+    // Ensure tools namespace exists
+    if (!config.modResults.manifest.$['xmlns:tools']) {
+      config.modResults.manifest.$['xmlns:tools'] = 'http://schemas.android.com/tools';
+    }
+
     const mainApplication = config.modResults.manifest.application?.[0];
 
     if (mainApplication) {
@@ -43,17 +48,22 @@ function withTrackPlayerAndroid(config) {
       }
 
       // Check if TrackPlayer service is already declared
-      const hasTrackPlayerService = mainApplication.service.some(
+      const trackPlayerServiceIndex = mainApplication.service.findIndex(
         (service) =>
           service.$?.['android:name'] === 'com.doublesymmetry.trackplayer.service.MusicService'
       );
 
-      // Add TrackPlayer service if not present
-      if (!hasTrackPlayerService) {
+      if (trackPlayerServiceIndex !== -1) {
+        // If it exists, update it to have the replace attribute
+         mainApplication.service[trackPlayerServiceIndex].$['tools:replace'] = 'android:exported';
+         mainApplication.service[trackPlayerServiceIndex].$['android:exported'] = 'false';
+      } else {
+        // Add TrackPlayer service if not present
         mainApplication.service.push({
           $: {
             'android:name': 'com.doublesymmetry.trackplayer.service.MusicService',
             'android:exported': 'false',
+            'tools:replace': 'android:exported',
           },
           'intent-filter': [
             {

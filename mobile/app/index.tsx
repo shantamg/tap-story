@@ -1,12 +1,15 @@
 import { SafeAreaView, StyleSheet } from 'react-native';
-import { DuetRecorder } from '../components/DuetRecorder';
+import { GestureHandlerRootView } from 'react-native-gesture-handler';
+import { DuetRecorderWithTrackPlayer } from '../components/DuetRecorderWithTrackPlayer';
 import { colors } from '../utils/theme';
 
 export default function HomeScreen() {
   return (
-    <SafeAreaView style={styles.container}>
-      <DuetRecorder />
-    </SafeAreaView>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <SafeAreaView style={styles.container}>
+        <DuetRecorderWithTrackPlayer />
+      </SafeAreaView>
+    </GestureHandlerRootView>
   );
 }
 

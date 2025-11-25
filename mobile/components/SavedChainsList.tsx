@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, LayoutChangeEvent } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, LayoutChangeEvent, Modal, Alert } from 'react-native';
 import { colors } from '../utils/theme';
 
 interface ChainSegment {
@@ -23,6 +23,7 @@ interface SavedChainsListProps {
   selectedChainId: string | null;
   onSelectChain: (chainId: string) => void;
   onRefresh: () => void;
+  onDeleteChain?: (chainId: string) => Promise<void>;
 }
 
 function TimelinePreview({ 
@@ -130,9 +131,13 @@ export function SavedChainsList({
   isLoading,
   selectedChainId,
   onSelectChain,
-  onRefresh
+  onRefresh,
+  onDeleteChain
 }: SavedChainsListProps) {
   const [containerWidth, setContainerWidth] = React.useState(300);
+  const [deleteModalVisible, setDeleteModalVisible] = useState(false);
+  const [chainToDelete, setChainToDelete] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
 
   const onContainerLayout = React.useCallback((event: LayoutChangeEvent) => {
     setContainerWidth(event.nativeEvent.layout.width);
@@ -167,6 +172,33 @@ export function SavedChainsList({
     return `Story ${visibleChains.length - index}`;
   };
 
+  const handleLongPress = (chainId: string) => {
+    if (!onDeleteChain) return;
+    setChainToDelete(chainId);
+    setDeleteModalVisible(true);
+  };
+
+  const handleDeleteConfirm = async () => {
+    if (!chainToDelete || !onDeleteChain) return;
+
+    try {
+      setIsDeleting(true);
+      await onDeleteChain(chainToDelete);
+      setDeleteModalVisible(false);
+      setChainToDelete(null);
+    } catch (error) {
+      console.error('[SavedChainsList] Failed to delete chain:', error);
+      Alert.alert('Error', 'Failed to delete story. Please try again.');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleDeleteCancel = () => {
+    setDeleteModalVisible(false);
+    setChainToDelete(null);
+  };
+
   return (
     <ScrollView 
       style={styles.container} 
@@ -180,6 +212,7 @@ export function SavedChainsList({
               key={chain.id}
               style={styles.chainItem}
               onPress={() => onSelectChain(chain.id)}
+              onLongPress={() => handleLongPress(chain.id)}
               activeOpacity={0.7}
             >
               <View style={styles.timelineContainer}>
@@ -196,6 +229,41 @@ export function SavedChainsList({
           );
         })}
       </View>
+
+      {/* Delete Confirmation Modal */}
+      <Modal
+        visible={deleteModalVisible}
+        transparent={true}
+        animationType="fade"
+        onRequestClose={handleDeleteCancel}
+      >
+        <View style={modalStyles.overlay}>
+          <View style={modalStyles.container}>
+            <Text style={modalStyles.title}>Delete Story?</Text>
+            <Text style={modalStyles.message}>
+              Are you sure you want to delete this story? This will permanently delete all audio files and cannot be undone.
+            </Text>
+            <View style={modalStyles.buttonContainer}>
+              <TouchableOpacity
+                style={[modalStyles.button, modalStyles.cancelButton]}
+                onPress={handleDeleteCancel}
+                disabled={isDeleting}
+              >
+                <Text style={modalStyles.cancelButtonText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[modalStyles.button, modalStyles.deleteButton]}
+                onPress={handleDeleteConfirm}
+                disabled={isDeleting}
+              >
+                <Text style={modalStyles.deleteButtonText}>
+                  {isDeleting ? 'Deleting...' : 'Delete'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
   );
 }
@@ -249,5 +317,62 @@ const styles = StyleSheet.create({
     color: colors.textTertiary,
     fontSize: 12,
     marginTop: 4,
+  },
+});
+
+const modalStyles = StyleSheet.create({
+  overlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.7)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  container: {
+    backgroundColor: colors.surface,
+    borderRadius: 12,
+    padding: 24,
+    width: '100%',
+    maxWidth: 400,
+  },
+  title: {
+    fontSize: 20,
+    fontWeight: 'bold',
+    color: colors.textPrimary,
+    marginBottom: 12,
+  },
+  message: {
+    fontSize: 14,
+    color: colors.textSecondary,
+    marginBottom: 24,
+    lineHeight: 20,
+  },
+  buttonContainer: {
+    flexDirection: 'row',
+    gap: 12,
+    justifyContent: 'flex-end',
+  },
+  button: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 8,
+    minWidth: 100,
+    alignItems: 'center',
+  },
+  cancelButton: {
+    backgroundColor: colors.border,
+  },
+  cancelButtonText: {
+    color: colors.textPrimary,
+    fontSize: 16,
+    fontWeight: '600',
+  },
+  deleteButton: {
+    backgroundColor: colors.recording,
+  },
+  deleteButtonText: {
+    color: '#FFFFFF',
+    fontSize: 16,
+    fontWeight: '600',
   },
 });

@@ -1,26 +1,17 @@
 /**
- * DuetRecorderWithTrackPlayer - Example integration of react-native-track-player
- *
- * This file demonstrates how to use the new track player service with the
- * existing DuetRecorder component. You can either:
- * 1. Replace DuetRecorder.tsx with this implementation
- * 2. Or use it as a reference to update your existing component
- *
- * Key changes from the original:
- * - Uses DuetTrackPlayer instead of DuetPlayer (expo-av)
- * - Uses getCorrectedRecordingStartTime() for better sync
- * - Supports time stretching via setPlaybackRate()
+ * DuetRecorderWithTrackPlayer - Audio duet recording component
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, Button, Alert, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Button, TouchableOpacity } from 'react-native';
 import { AudioRecorder } from '../services/audioService';
-import { DuetTrackPlayer, DuetSegment, LATENCY_OFFSET_MS } from '../services/audio';
+import { DuetTrackPlayer, DuetSegment } from '../services/audio';
 import { CassettePlayerControls } from './CassettePlayerControls';
 import { AudioTimeline } from './AudioTimeline';
 import { SavedChainsList } from './SavedChainsList';
 import { getApiUrl } from '../utils/api';
-import { saveRecordingLocally, getLocalAudioPath } from '../services/audioStorage';
+import { saveRecordingLocally, saveLatencyOffset, getLatencyOffset } from '../services/audioStorage';
 import { colors } from '../utils/theme';
+import { LatencyNudge } from './LatencyNudge';
 
 interface AudioChainNode extends DuetSegment {
   parentId: string | null;
@@ -41,9 +32,6 @@ interface ChainSummary {
   segments: ChainSegment[];
 }
 
-// Available playback speeds for time stretching
-const PLAYBACK_SPEEDS = [0.5, 0.75, 1.0, 1.25, 1.5, 2.0];
-
 export function DuetRecorderWithTrackPlayer() {
   const [isRecording, setIsRecording] = useState(false);
   const [isWaitingToRecord, setIsWaitingToRecord] = useState(false);
@@ -53,10 +41,11 @@ export function DuetRecorderWithTrackPlayer() {
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [currentPosition, setCurrentPosition] = useState(0);
   const [recordingDuration, setRecordingDuration] = useState(0);
+  const [recordingStartTime, setRecordingStartTime] = useState(0); // Start time for current recording
   const [seekPreviewPosition, setSeekPreviewPosition] = useState<number | null>(null);
-
-  // NEW: Playback speed state
-  const [playbackSpeed, setPlaybackSpeed] = useState(1.0);
+  const [processingSegmentIds, setProcessingSegmentIds] = useState<Set<string>>(new Set());  // Segments being uploaded/processed
+  const [latencyOffsetMs, setLatencyOffsetMs] = useState(0);
+  const [isCalibratingLatency, setIsCalibratingLatency] = useState(false);
 
   // Saved chains state
   const [savedChains, setSavedChains] = useState<ChainSummary[]>([]);
@@ -65,17 +54,30 @@ export function DuetRecorderWithTrackPlayer() {
   // View state
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
 
-  // Use the new DuetTrackPlayer instead of DuetPlayer
-  const recorder = useRef(new AudioRecorder());
-  const player = useRef(new DuetTrackPlayer());
+  // Lazy initialization to prevent creating new instances on every render
+  const recorderRef = useRef<AudioRecorder | null>(null);
+  const playerRef = useRef<DuetTrackPlayer | null>(null);
+  
+  if (!recorderRef.current) {
+    recorderRef.current = new AudioRecorder();
+  }
+  if (!playerRef.current) {
+    playerRef.current = new DuetTrackPlayer();
+  }
+  
+  // Non-null references (guaranteed by lazy init above)
+  const recorder = recorderRef as React.MutableRefObject<AudioRecorder>;
+  const player = playerRef as React.MutableRefObject<DuetTrackPlayer>;
+  
   const recordingStartTimestamp = useRef(0);
-  const recordingStartTimeInChain = useRef(0);
   const positionInterval = useRef<NodeJS.Timeout | null>(null);
   const recordingDurationInterval = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     initAudio();
     fetchSavedChains();
+     // Load persisted latency offset for this device
+    loadLatencyOffset();
     return () => {
       recorder.current.cleanup();
       player.current.cleanup();
@@ -94,7 +96,59 @@ export function DuetRecorderWithTrackPlayer() {
       // Initialize the track player
       await player.current.initialize();
     } catch (error) {
-      Alert.alert('Error', 'Failed to initialize audio. Please grant microphone permissions.');
+      console.error('[DuetRecorderWithTrackPlayer] Failed to initialize audio:', error);
+    }
+  }
+
+  async function loadLatencyOffset() {
+    const offset = await getLatencyOffset();
+    setLatencyOffsetMs(offset);
+  }
+
+  async function handleLatencyChange(newOffset: number) {
+    setLatencyOffsetMs(newOffset);
+    await saveLatencyOffset(newOffset);
+  }
+
+  async function calibrateLatencyFromLastTwo() {
+    if (audioChain.length < 2) {
+      console.warn('[DuetRecorderWithTrackPlayer] Not enough segments to calibrate latency');
+      return;
+    }
+
+    const referenceNodeId = audioChain[audioChain.length - 2].id;
+    const testNodeId = audioChain[audioChain.length - 1].id;
+
+    try {
+      setIsCalibratingLatency(true);
+      console.log('[DuetRecorderWithTrackPlayer] Calibrating latency from nodes:', referenceNodeId, testNodeId);
+
+      const response = await fetch(`${getApiUrl()}/api/audio/calibrate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ referenceNodeId, testNodeId }),
+      });
+
+      if (!response.ok) {
+        const text = await response.text();
+        console.error('[DuetRecorderWithTrackPlayer] Latency calibration failed:', response.status, text);
+        throw new Error('Latency calibration failed');
+      }
+
+      const data = await response.json() as { offsetMs?: number };
+      if (typeof data.offsetMs !== 'number' || Number.isNaN(data.offsetMs)) {
+        console.error('[DuetRecorderWithTrackPlayer] Invalid offsetMs from calibration:', data);
+        throw new Error('Invalid calibration result');
+      }
+
+      const newOffset = Math.round(data.offsetMs);
+      console.log('[DuetRecorderWithTrackPlayer] Calibration result offsetMs:', newOffset);
+      setLatencyOffsetMs(newOffset);
+      await saveLatencyOffset(newOffset);
+    } catch (error) {
+      console.error('[DuetRecorderWithTrackPlayer] Error during latency calibration:', error);
+    } finally {
+      setIsCalibratingLatency(false);
     }
   }
 
@@ -114,6 +168,51 @@ export function DuetRecorderWithTrackPlayer() {
     }
   }, []);
 
+  const deleteChain = useCallback(async (chainId: string) => {
+    try {
+      setIsLoading(true);
+      console.log('[DuetRecorderWithTrackPlayer] Deleting chain:', chainId);
+
+      // First, get all nodes in the chain to delete local files
+      const treeResponse = await fetch(`${getApiUrl()}/api/audio/tree/${chainId}`);
+      if (!treeResponse.ok) {
+        throw new Error('Failed to fetch chain tree');
+      }
+      const treeData = await treeResponse.json();
+      const ancestors = treeData.ancestors || [];
+
+      // Delete local files for all nodes in the chain
+      const { deleteLocalAudio } = await import('../services/audioStorage');
+      for (const node of ancestors) {
+        try {
+          await deleteLocalAudio(node.id);
+        } catch (error) {
+          console.error(`[DuetRecorderWithTrackPlayer] Failed to delete local file for ${node.id}:`, error);
+          // Continue even if local delete fails
+        }
+      }
+
+      // Delete from backend (S3 and database)
+      const deleteResponse = await fetch(`${getApiUrl()}/api/audio/chain/${chainId}`, {
+        method: 'DELETE',
+      });
+
+      if (!deleteResponse.ok) {
+        throw new Error('Failed to delete chain');
+      }
+
+      console.log('[DuetRecorderWithTrackPlayer] Chain deleted successfully');
+      
+      // Refresh the chains list
+      await fetchSavedChains();
+    } catch (error) {
+      console.error('[DuetRecorderWithTrackPlayer] Failed to delete chain:', error);
+      throw error;
+    } finally {
+      setIsLoading(false);
+    }
+  }, [fetchSavedChains]);
+
   async function loadChain(chainId: string) {
     try {
       setIsLoading(true);
@@ -131,28 +230,19 @@ export function DuetRecorderWithTrackPlayer() {
         duration: number;
       }> = data.ancestors;
 
-      console.log('[DuetRecorder] Loaded ancestors:', ancestors.length);
-
-      // Calculate start times
+      // Calculate start times - first two at 0, then alternating tracks
       const chain: AudioChainNode[] = [];
       for (let i = 0; i < ancestors.length; i++) {
         const node = ancestors[i];
         let startTime = 0;
 
-        if (i === 0) {
-          startTime = 0;
-        } else if (i === 1) {
-          startTime = 0;
-        } else {
-          const endTimes = chain.map(seg => seg.startTime + seg.duration);
-          const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
-          startTime = sortedEndTimes[i - 2];
+        if (i >= 2) {
+          // 3rd+ segment starts at end of segment 2 positions back (same track)
+          const sameTrackSegment = chain[i - 2];
+          startTime = sameTrackSegment.startTime + sameTrackSegment.duration;
         }
 
-        chain.push({
-          ...node,
-          startTime,
-        });
+        chain.push({ ...node, startTime });
       }
 
       setAudioChain(chain);
@@ -162,95 +252,123 @@ export function DuetRecorderWithTrackPlayer() {
       await player.current.cleanup();
     } catch (error) {
       console.error('[DuetRecorder] Failed to load chain:', error);
-      Alert.alert('Error', 'Failed to load story');
     } finally {
       setIsLoading(false);
     }
   }
 
   function getNextRecordingStartTime(): number {
-    if (audioChain.length === 0) return 0;
-    if (audioChain.length === 1) return 0;
-
-    const endTimes = audioChain.map(seg => seg.startTime + seg.duration);
-    const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
-    return sortedEndTimes[audioChain.length - 2];
+    // First two recordings start at 0 (duet format - both tracks start together)
+    if (audioChain.length < 2) {
+      return 0;
+    }
+    // 3rd+ recording: start at the end of the segment 2 positions back (same track)
+    // Segment 3 starts when segment 1 ends, segment 4 when segment 2 ends, etc.
+    const sameTrackSegment = audioChain[audioChain.length - 2];
+    return sameTrackSegment.startTime + sameTrackSegment.duration;
   }
-
-  const RECORDING_PRE_ROLL_SECONDS = 1.0;
 
   async function startDuetRecording() {
     try {
       setIsLoading(true);
-      console.log('[DuetRecorder] Starting duet recording');
+      console.log('[DuetRecorder] Starting duet recording, chain length:', audioChain.length);
 
+      // Calculate the logical start time (where the new track should begin)
       const logicalStartTime = getNextRecordingStartTime();
-      const actualRecordingStartTime = Math.max(0, logicalStartTime - RECORDING_PRE_ROLL_SECONDS);
-      recordingStartTimeInChain.current = actualRecordingStartTime;
+
+      console.log('[DuetRecorder] Recording will start at:', logicalStartTime);
 
       if (audioChain.length > 0) {
         await player.current.loadChain(audioChain);
 
-        // Set the playback speed (time stretching)
-        await player.current.setPlaybackRate(playbackSpeed);
-
         await recorder.current.prepareRecording();
 
-        if (!isPlaying) {
-          setCurrentPosition(0);
-          startPositionTracking();
+        // Get current playhead position
+        const currentPlayheadPosition = isPlaying 
+          ? await player.current.getCurrentPosition() 
+          : currentPosition;
+
+        // If playhead is past the recording start, seek back
+        if (currentPlayheadPosition >= logicalStartTime) {
+          console.log('[DuetRecorder] Playhead is after recording start point, seeking back');
+          const seekPosition = Math.max(0, logicalStartTime - 1.0);
+          await player.current.stop();
+          setIsPlaying(false);
+          stopPositionTracking();
+          
+          // Seek and wait for it to complete
+          await player.current.loadChain(audioChain);
+          
+          // Start playback from seek position, will trigger recording when ready
+          setCurrentPosition(seekPosition);
           setIsWaitingToRecord(true);
           setIsLoading(false);
-
-          // Use the new playFrom with callback
-          player.current.playFrom(0, actualRecordingStartTime, () => {
-            console.log('[DuetRecorder] Reached pre-roll point');
+          
+          setRecordingStartTime(logicalStartTime);
+          
+          console.log('[DuetRecorder] Playback from', seekPosition, 'recording at:', logicalStartTime);
+          
+          // Start playback first, then start position tracking
+          await player.current.playFrom(seekPosition, logicalStartTime, () => {
+            console.log('[DuetRecorder] Reached recording start point, beginning recording at:', logicalStartTime);
             setIsWaitingToRecord(false);
             actuallyStartRecording();
           });
           setIsPlaying(true);
-        } else {
+          startPositionTracking();
+        } else if (!isPlaying) {
+          // Not playing and playhead is before recording start - start from beginning
+          setCurrentPosition(0);
           setIsWaitingToRecord(true);
           setIsLoading(false);
 
-          if (currentPosition >= actualRecordingStartTime) {
+          setRecordingStartTime(logicalStartTime);
+
+          console.log('[DuetRecorder] Playback from 0, recording at:', logicalStartTime);
+          
+          // Start playback first, then start position tracking
+          await player.current.playFrom(0, logicalStartTime, () => {
+            console.log('[DuetRecorder] Reached recording start point at:', logicalStartTime);
             setIsWaitingToRecord(false);
-            await actuallyStartRecording();
-          }
+            actuallyStartRecording();
+          });
+          setIsPlaying(true);
+          startPositionTracking();
+        } else {
+          // Already playing - stop and restart with callback
+          setRecordingStartTime(logicalStartTime);
+          setIsWaitingToRecord(true);
+          setIsLoading(false);
+          
+          const currentPos = await player.current.getCurrentPosition();
+          console.log('[DuetRecorder] Resuming from', currentPos, 'recording at:', logicalStartTime);
+          
+          // Stop and restart with callback (simplest reliable approach)
+          await player.current.stop();
+          await player.current.playFrom(currentPos, logicalStartTime, () => {
+            console.log('[DuetRecorder] Reached recording start point at:', logicalStartTime);
+            setIsWaitingToRecord(false);
+            actuallyStartRecording();
+          });
         }
       } else {
+        // First recording - start at 0
+        setRecordingStartTime(0);
         await actuallyStartRecording();
       }
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
-      Alert.alert('Error', 'Failed to start recording');
       setIsLoading(false);
       setIsWaitingToRecord(false);
     }
   }
 
-  /**
-   * CRITICAL: Use getCorrectedRecordingStartTime for better sync
-   *
-   * This function gets the player's current position and subtracts the
-   * latency offset to determine where the recording actually starts
-   * relative to the backing track.
-   */
   async function actuallyStartRecording() {
     try {
-      // NEW: Get the CORRECTED recording start time using the player's position
-      // This accounts for audio output latency
-      const correctedStartTime = await player.current.getCorrectedRecordingStartTime();
-      console.log(`[DuetRecorder] Corrected start time: ${correctedStartTime.toFixed(3)}s (latency offset: ${LATENCY_OFFSET_MS}ms)`);
-
-      // Start recording
       const actualStartTimestamp = await recorder.current.startRecording();
-
-      // Use the corrected position for alignment
-      recordingStartTimeInChain.current = correctedStartTime;
       recordingStartTimestamp.current = actualStartTimestamp;
 
-      console.log('[DuetRecorder] Recording started, aligned to timeline position:', correctedStartTime);
+      console.log('[DuetRecorder] Recording started at:', recordingStartTime);
 
       setIsRecording(true);
       setRecordingDuration(0);
@@ -261,7 +379,6 @@ export function DuetRecorderWithTrackPlayer() {
       }, 100);
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
-      Alert.alert('Error', 'Failed to start recording');
     } finally {
       setIsLoading(false);
     }
@@ -287,6 +404,26 @@ export function DuetRecorderWithTrackPlayer() {
       stopPositionTracking();
 
       const duration = Math.ceil((Date.now() - recordingStartTimestamp.current) / 1000);
+      const startTime = recordingStartTime;
+
+      console.log('[DuetRecorder] Saving segment - startTime:', startTime, 'duration:', duration);
+
+      // Create temporary segment ID for the new recording
+      const tempSegmentId = `temp-${Date.now()}`;
+      
+      // Add segment to chain immediately with temporary data (before upload)
+      const tempNode: AudioChainNode = {
+        id: tempSegmentId,
+        audioUrl: '', // Will be updated after upload
+        duration,
+        startTime,
+        parentId: currentNodeId,
+      };
+
+      // Add to chain and mark as processing
+      const newChain = [...audioChain, tempNode];
+      setAudioChain(newChain);
+      setProcessingSegmentIds(prev => new Set([...prev, tempSegmentId]));
 
       const key = await recorder.current.uploadRecording(tempUri);
 
@@ -307,23 +444,41 @@ export function DuetRecorderWithTrackPlayer() {
       }
 
       const savedNode = await saveResponse.json();
-
       const localUri = await saveRecordingLocally(tempUri, savedNode.id);
 
       const nodeWithLocalUri: AudioChainNode = {
         ...savedNode,
         localUri,
-        startTime: recordingStartTimeInChain.current,
+        startTime,
       };
 
-      const newChain = [...audioChain, nodeWithLocalUri];
-      setAudioChain(newChain);
-      setCurrentNodeId(savedNode.id);
+      // Replace temp node with real node
+      const updatedChain = newChain.map(node => 
+        node.id === tempSegmentId ? nodeWithLocalUri : node
+      );
 
-      Alert.alert('Success', `Recording saved! Duration: ${duration}s`);
+      setAudioChain(updatedChain);
+      setCurrentNodeId(savedNode.id);
+      
+      // Remove from processing set
+      setProcessingSegmentIds(prev => {
+        const next = new Set(prev);
+        next.delete(tempSegmentId);
+        return next;
+      });
     } catch (error) {
-      Alert.alert('Error', 'Failed to save recording');
-      console.error('[DuetRecorder] Recording save error:', error);
+      console.error('[DuetRecorderWithTrackPlayer] Recording save error:', error);
+      // Remove the temp segment on error
+      setAudioChain(prev => prev.filter(node => !node.id.startsWith('temp-')));
+      setProcessingSegmentIds(prev => {
+        const next = new Set(prev);
+        Array.from(prev).forEach(id => {
+          if (id.startsWith('temp-')) {
+            next.delete(id);
+          }
+        });
+        return next;
+      });
     } finally {
       setIsLoading(false);
     }
@@ -389,7 +544,7 @@ export function DuetRecorderWithTrackPlayer() {
   async function handleFastForward() {
     if (isRecording) return;
     if (isWaitingToRecord) {
-      await handleSeek(recordingStartTimeInChain.current);
+      await handleSeek(recordingStartTime);
     } else if (audioChain.length > 0) {
       await player.current.loadChain(audioChain);
       const totalDuration = player.current.getTotalDuration();
@@ -405,12 +560,8 @@ export function DuetRecorderWithTrackPlayer() {
     positionInterval.current = setInterval(async () => {
       const pos = await player.current.getCurrentPosition();
       setCurrentPosition(pos);
-
-      if (isWaitingToRecord && pos >= recordingStartTimeInChain.current) {
-        console.log('[DuetRecorder] Reached recording start point');
-        setIsWaitingToRecord(false);
-        await actuallyStartRecording();
-      }
+      // Note: Recording is triggered by the playFrom callback, not position tracking
+      // This avoids race conditions between the two triggers
     }, 100);
   }
 
@@ -424,7 +575,6 @@ export function DuetRecorderWithTrackPlayer() {
 
   async function playFromPlayhead() {
     if (audioChain.length === 0) {
-      Alert.alert('No Audio', 'Record something first!');
       return;
     }
 
@@ -441,19 +591,15 @@ export function DuetRecorderWithTrackPlayer() {
       setIsLoading(true);
       await player.current.loadChain(audioChain);
 
-      // Apply the playback speed (time stretching)
-      await player.current.setPlaybackRate(playbackSpeed);
-
       setIsLoading(false);
       setIsPlaying(true);
       setCurrentPosition(startPosition);
       setSeekPreviewPosition(null);
-      startPositionTracking();
 
       await player.current.playFrom(startPosition);
+      startPositionTracking();
     } catch (error) {
       console.error('[DuetRecorder] Playback error:', error);
-      Alert.alert('Error', 'Failed to play audio');
       setIsPlaying(false);
       setIsLoading(false);
       stopPositionTracking();
@@ -469,8 +615,8 @@ export function DuetRecorderWithTrackPlayer() {
     if (isRecording) return;
     if (audioChain.length === 0) return;
 
-    if (isWaitingToRecord && position >= recordingStartTimeInChain.current) {
-      position = Math.max(0, recordingStartTimeInChain.current - 0.1);
+    if (isWaitingToRecord && position >= recordingStartTime) {
+      position = Math.max(0, recordingStartTime - 0.1);
     }
 
     setCurrentPosition(position);
@@ -481,8 +627,8 @@ export function DuetRecorderWithTrackPlayer() {
     if (isRecording) return;
     if (audioChain.length === 0) return;
 
-    if (isWaitingToRecord && position >= recordingStartTimeInChain.current) {
-      position = Math.max(0, recordingStartTimeInChain.current - 0.1);
+    if (isWaitingToRecord && position >= recordingStartTime) {
+      position = Math.max(0, recordingStartTime - 0.1);
     }
 
     try {
@@ -501,33 +647,19 @@ export function DuetRecorderWithTrackPlayer() {
       if (wasPlaying) {
         if (isWaitingToRecord) {
           setIsPlaying(true);
-          startPositionTracking();
-          await player.current.playFrom(position, recordingStartTimeInChain.current, () => {
+          await player.current.playFrom(position, recordingStartTime, () => {
             setIsWaitingToRecord(false);
             actuallyStartRecording();
           });
+          startPositionTracking();
         } else {
           setIsPlaying(true);
-          startPositionTracking();
           await player.current.playFrom(position);
+          startPositionTracking();
         }
       }
     } catch (error) {
       console.error('[DuetRecorder] Seek error:', error);
-      Alert.alert('Error', 'Failed to seek audio');
-    }
-  }
-
-  /**
-   * NEW: Handle playback speed change
-   * This allows users to speed up or slow down playback without changing pitch
-   */
-  async function handleSpeedChange(speed: number) {
-    setPlaybackSpeed(speed);
-
-    // If currently playing, apply the speed change immediately
-    if (isPlaying) {
-      await player.current.setPlaybackRate(speed);
     }
   }
 
@@ -551,6 +683,7 @@ export function DuetRecorderWithTrackPlayer() {
             selectedChainId={null}
             onSelectChain={loadChain}
             onRefresh={fetchSavedChains}
+            onDeleteChain={deleteChain}
           />
         </View>
       </View>
@@ -576,12 +709,13 @@ export function DuetRecorderWithTrackPlayer() {
           onSegmentTap={handleSegmentTap}
           isRecording={isRecording}
           isWaitingToRecord={isWaitingToRecord}
-          recordingStartTime={recordingStartTimeInChain.current}
+          recordingStartTime={recordingStartTime}
           recordingDuration={recordingDuration}
           currentTimelinePosition={currentPosition}
           previewTimelinePosition={seekPreviewPosition}
           onSeek={handleSeek}
           onSeekPreview={handleSeekPreview}
+          processingSegmentIds={processingSegmentIds}
         />
       </View>
 
@@ -598,33 +732,6 @@ export function DuetRecorderWithTrackPlayer() {
         )}
       </View>
 
-      {/* NEW: Playback Speed Control */}
-      <View style={styles.speedControlContainer}>
-        <Text style={styles.speedLabel}>Speed:</Text>
-        <View style={styles.speedButtons}>
-          {PLAYBACK_SPEEDS.map((speed) => (
-            <TouchableOpacity
-              key={speed}
-              style={[
-                styles.speedButton,
-                playbackSpeed === speed && styles.speedButtonActive,
-              ]}
-              onPress={() => handleSpeedChange(speed)}
-              disabled={isRecording}
-            >
-              <Text
-                style={[
-                  styles.speedButtonText,
-                  playbackSpeed === speed && styles.speedButtonTextActive,
-                ]}
-              >
-                {speed}x
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </View>
-
       {/* Cassette player controls */}
       <CassettePlayerControls
         isPlaying={isPlaying}
@@ -639,6 +746,22 @@ export function DuetRecorderWithTrackPlayer() {
         onFastForward={handleFastForward}
       />
 
+      <LatencyNudge
+        offsetMs={latencyOffsetMs}
+        onOffsetChange={handleLatencyChange}
+        disabled={isRecording || isPlaying || isCalibratingLatency}
+      />
+
+      {audioChain.length >= 2 && (
+        <View style={styles.calibrationContainer}>
+          <Button
+            title={isCalibratingLatency ? 'Calibrating…' : 'Calibrate sync from last 2 tracks'}
+            onPress={calibrateLatencyFromLastTwo}
+            disabled={isRecording || isPlaying || isCalibratingLatency}
+          />
+        </View>
+      )}
+
       {/* Hint text */}
       {audioChain.length === 0 && (
         <Text style={styles.hint}>
@@ -647,7 +770,7 @@ export function DuetRecorderWithTrackPlayer() {
       )}
       {audioChain.length > 0 && (
         <Text style={styles.hint}>
-          Tap record to add to the story. Use speed controls for time stretching.
+          Tap record to add to the story.
         </Text>
       )}
     </View>
@@ -715,44 +838,8 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     paddingHorizontal: 20,
   },
-  // NEW: Speed control styles
-  speedControlContainer: {
-    flexDirection: 'row',
+  calibrationContainer: {
+    marginTop: 8,
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 20,
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  speedLabel: {
-    fontSize: 14,
-    color: colors.textSecondary,
-    marginRight: 12,
-  },
-  speedButtons: {
-    flexDirection: 'row',
-    gap: 8,
-  },
-  speedButton: {
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: colors.surface || '#333',
-    borderWidth: 1,
-    borderColor: colors.border || '#444',
-  },
-  speedButtonActive: {
-    backgroundColor: colors.primary || '#007AFF',
-    borderColor: colors.primary || '#007AFF',
-  },
-  speedButtonText: {
-    fontSize: 12,
-    color: colors.textSecondary,
-    fontWeight: '500',
-  },
-  speedButtonTextActive: {
-    color: '#fff',
-    fontWeight: '600',
   },
 });
-

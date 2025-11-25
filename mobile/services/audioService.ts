@@ -1,13 +1,16 @@
-import { Audio } from 'expo-av';
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { Platform } from 'react-native';
 import { getApiUrl } from '../utils/api';
 
 // Recording preset configuration
 const RECORDING_OPTIONS = {
   android: {
-    extension: '.webm',
-    outputFormat: Audio.AndroidOutputFormat.WEBM,
-    audioEncoder: Audio.AndroidAudioEncoder.DEFAULT,
+    extension: '.m4a',
+    outputFormat: Audio.AndroidOutputFormat.MPEG_4,
+    audioEncoder: Audio.AndroidAudioEncoder.AAC,
+    sampleRate: 44100,
+    numberOfChannels: 2,
+    bitRate: 128000,
   },
   ios: {
     extension: '.m4a',
@@ -41,6 +44,10 @@ export class AudioRecorder {
         allowsRecordingIOS: true,
         playsInSilentModeIOS: true,
         staysActiveInBackground: true,
+        interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+        interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+        shouldDuckAndroid: true,
+        playThroughEarpieceAndroid: false,
       });
 
       this.ready = true;

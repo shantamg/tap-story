@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { v4 as uuidv4 } from 'uuid';
 
@@ -36,4 +36,16 @@ export async function generateDownloadUrl(key: string): Promise<string> {
   });
 
   return await getSignedUrl(s3Client, command, { expiresIn: 3600 });
+}
+
+/**
+ * Delete an audio file from S3
+ */
+export async function deleteAudioFile(key: string): Promise<void> {
+  const command = new DeleteObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+  });
+
+  await s3Client.send(command);
 }

@@ -25,7 +25,8 @@
     "deploy:mobile:ios": "cd mobile && eas build --platform ios",
     "deploy:mobile:android": "cd mobile && eas build --platform android",
     "clean": "npm run clean --workspaces --if-present",
-    "reset": "./scripts/reset-all.sh"
+    "reset": "./scripts/reset-all.sh",
+    "postinstall": "patch-package"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

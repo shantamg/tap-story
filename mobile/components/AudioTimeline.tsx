@@ -24,6 +24,7 @@ interface AudioTimelineProps {
   onSeek?: (position: number) => void;  // Callback when user seeks to a position (actual seek)
   onSeekPreview?: (position: number) => void;  // Callback during drag for visual feedback only
   previewTimelinePosition?: number | null; // Visual preview position during dragging
+  processingSegmentIds?: Set<string>; // IDs of segments currently being uploaded/processed
 }
 
 const MIN_WIDTH_PX = 30; // Minimum segment width in pixels
@@ -39,11 +40,25 @@ export function AudioTimeline({
   onSeek,
   onSeekPreview,
   previewTimelinePosition = null,
+  processingSegmentIds = new Set(),
 }: AudioTimelineProps) {
   const [containerWidth, setContainerWidth] = useState(300);
   const [zoomScale, setZoomScale] = useState(1); // 1 = auto-fit, >1 = zoomed in
   const baseZoomScale = useRef(1);
   const scrollViewRef = useRef<ScrollView>(null);
+  const [scrollOffset, setScrollOffset] = useState(0);
+  const previousSegmentsLength = useRef(segments.length);
+
+  // Reset zoom scale when starting a new story (segments go from having items to empty)
+  useEffect(() => {
+    if (previousSegmentsLength.current > 0 && segments.length === 0) {
+      // Starting a new story - reset zoom to default
+      setZoomScale(1);
+      setScrollOffset(0);
+      baseZoomScale.current = 1;
+    }
+    previousSegmentsLength.current = segments.length;
+  }, [segments.length]);
 
   // Check if we should show timeline
   const shouldShow = segments.length > 0 || isRecording;
@@ -59,13 +74,45 @@ export function AudioTimeline({
   // The timeline scale is based on whichever is larger:
   // - The max saved segment end time
   // - The current recording end time (only if it exceeds saved segments)
-  // This means: first recording = always full width, second recording doesn't shrink first until it's longer
-  const timelineDuration = Math.max(1, maxSavedEndTime, recordingEndTime);
+  // For the first recording (no saved segments), use a small initial duration
+  // to ensure it starts at the left edge, not centered
+  let timelineDuration: number;
+  if (segments.length === 0 && isRecording) {
+    // First recording: use recording duration, but ensure minimum of 0.5s so it's visible
+    // This ensures the recording starts at the left edge (time 0) rather than centered
+    timelineDuration = Math.max(0.5, recordingDuration);
+  } else {
+    // Subsequent recordings: use max of saved segments and current recording
+    timelineDuration = Math.max(1, maxSavedEndTime, recordingEndTime);
+  }
 
   // Handle container layout to get width
   const onContainerLayout = useCallback((event: LayoutChangeEvent) => {
     setContainerWidth(event.nativeEvent.layout.width);
   }, []);
+
+  // Calculate available width for timeline content (full width, no padding)
+  const availableWidth = containerWidth * zoomScale;
+
+  // Helper to convert time to pixel width
+  const timeToWidth = useCallback((duration: number): number => {
+    const width = (duration / timelineDuration) * availableWidth;
+    return Math.max(width, MIN_WIDTH_PX);
+  }, [timelineDuration, availableWidth]);
+
+  // Helper to convert time to pixel position
+  const timeToLeft = useCallback((startTime: number): number => {
+    // For the first recording, always start at the left edge (0) regardless of actual start time
+    // The pre-roll is for audio capture, not visual positioning
+    const visualStartTime = (segments.length === 0 && isRecording) ? 0 : startTime;
+    return (visualStartTime / timelineDuration) * availableWidth;
+  }, [segments.length, isRecording, timelineDuration, availableWidth]);
+
+  // Helper to convert pixel position to timeline time
+  const leftToTime = useCallback((pixelX: number): number => {
+    const clampedX = Math.max(0, Math.min(pixelX, availableWidth));
+    return (clampedX / availableWidth) * timelineDuration;
+  }, [availableWidth, timelineDuration]);
 
   // Pinch gesture for zooming
   const pinchGesture = Gesture.Pinch()
@@ -83,9 +130,6 @@ export function AudioTimeline({
     .onEnd(() => {
       setZoomScale(1);
     });
-
-  // Track scroll offset for zoomed timeline
-  const [scrollOffset, setScrollOffset] = useState(0);
 
   // Helper function to calculate position (runs on JS thread)
   const calculatePosition = useCallback((eventX: number) => {
@@ -161,25 +205,6 @@ export function AudioTimeline({
     return null;
   }
 
-  // Calculate available width for timeline content (full width, no padding)
-  const availableWidth = containerWidth * zoomScale;
-
-  // Helper to convert time to pixel width
-  const timeToWidth = (duration: number): number => {
-    const width = (duration / timelineDuration) * availableWidth;
-    return Math.max(width, MIN_WIDTH_PX);
-  };
-
-  // Helper to convert time to pixel position
-  const timeToLeft = (startTime: number): number => {
-    return (startTime / timelineDuration) * availableWidth;
-  };
-
-  // Helper to convert pixel position to timeline time
-  const leftToTime = (pixelX: number): number => {
-    const clampedX = Math.max(0, Math.min(pixelX, availableWidth));
-    return (clampedX / availableWidth) * timelineDuration;
-  };
 
   const effectiveTimelinePosition =
     previewTimelinePosition !== null
@@ -187,10 +212,9 @@ export function AudioTimeline({
       : currentTimelinePosition;
 
   // Calculate current playhead position
-  // When recording, use recording position; otherwise use playback position (or preview)
+  // When recording, playhead is at the recording position (start time + duration)
   const getPlayheadPosition = (): number => {
     if (isRecording) {
-      // When recording, playhead is at the current recording position
       return recordingStartTime + recordingDuration;
     }
     return effectiveTimelinePosition;
@@ -232,6 +256,7 @@ export function AudioTimeline({
     isPlaying,
     onSegmentTap,
     recordingDuration,
+    isProcessing,
   }: {
     segment: AudioSegment;
     index: number;
@@ -241,6 +266,7 @@ export function AudioTimeline({
     isPlaying: boolean;
     onSegmentTap?: (segment: AudioSegment) => void;
     recordingDuration: number;
+    isProcessing: boolean;
   }) => {
     // Animated values for glow effect
     const glowOpacity = useSharedValue(isPlaying ? 1 : 0);
@@ -254,11 +280,15 @@ export function AudioTimeline({
 
     // Animated style for the segment
     const animatedStyle = useAnimatedStyle(() => {
-      // Interpolate between dark purple and bright purple
+      // If processing, use orange/yellow color; otherwise use purple
+      const baseColor = isProcessing 
+        ? ['rgba(255, 149, 0, 0.7)', 'rgba(255, 204, 0, 0.9)'] // Orange to yellow for processing
+        : ['rgba(88, 28, 135, 0.85)', 'rgba(147, 51, 234, 1.0)']; // Dark purple to bright purple
+      
       const backgroundColor = interpolateColor(
         brightness.value,
         [0, 1],
-        ['rgba(88, 28, 135, 0.85)', 'rgba(147, 51, 234, 1.0)'] // Dark purple to bright purple
+        baseColor
       );
       
       return {
@@ -273,10 +303,11 @@ export function AudioTimeline({
       styles.segmentBar,
       {
         width,
-        position: 'absolute',
+        position: 'absolute' as const,
         left,
       },
       isRecordingSegment && styles.recordingSegment,
+      isProcessing && styles.processingSegment,
     ];
 
     const SegmentComponent = isRecordingSegment ? View : TouchableOpacity;
@@ -321,6 +352,7 @@ export function AudioTimeline({
     const width = timeToWidth(segment.duration);
     const left = timeToLeft(segment.startTime);
     const playing = !isRecordingSegment && isSegmentPlaying(segment);
+    const isProcessing = processingSegmentIds.has(segment.id);
 
     return (
       <AnimatedSegment
@@ -333,6 +365,7 @@ export function AudioTimeline({
         isPlaying={playing}
         onSegmentTap={onSegmentTap}
         recordingDuration={recordingDuration}
+        isProcessing={isProcessing}
       />
     );
   };
@@ -486,6 +519,12 @@ const styles = StyleSheet.create({
     borderWidth: 2,
     borderColor: '#fff',
     opacity: 0.9,
+  },
+  processingSegment: {
+    // Processing segments use animated color, but we can add a border to distinguish
+    borderWidth: 2,
+    borderColor: colors.waiting, // Orange border for processing
+    borderStyle: 'dashed', // Dashed border to indicate processing
   },
   zoomHint: {
     textAlign: 'center',

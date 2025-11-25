@@ -1,7 +1,33 @@
 import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const AUDIO_DIRECTORY = `${FileSystem.documentDirectory}audio/`;
+const LATENCY_KEY = 'tapstory_latency_offset_ms';
+
+/**
+ * Save global latency offset
+ */
+export async function saveLatencyOffset(offsetMs: number): Promise<void> {
+  try {
+    await AsyncStorage.setItem(LATENCY_KEY, offsetMs.toString());
+  } catch (e) {
+    console.error('Failed to save latency offset:', e);
+  }
+}
+
+/**
+ * Get global latency offset
+ */
+export async function getLatencyOffset(): Promise<number> {
+  try {
+    const value = await AsyncStorage.getItem(LATENCY_KEY);
+    return value ? parseInt(value, 10) : 0;
+  } catch (e) {
+    console.error('Failed to get latency offset:', e);
+    return 0;
+  }
+}
 
 /**
  * Ensures the audio directory exists

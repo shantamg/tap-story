@@ -102,9 +102,9 @@ export async function destroyTrackPlayer(): Promise<void> {
   if (!isSetup) return;
 
   try {
-    await TrackPlayer.destroy();
+    await TrackPlayer.reset();
     isSetup = false;
-    console.log('[TrackPlayer] Destroyed');
+    console.log('[TrackPlayer] Destroyed (reset)');
   } catch (error) {
     console.error('[TrackPlayer] Destroy failed:', error);
   }
