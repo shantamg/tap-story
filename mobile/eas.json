@@ -14,7 +14,8 @@
         "buildArtifactPaths": ["ios/build/*"]
       },
       "android": {
-        "buildType": "apk"
+        "buildType": "apk",
+        "applicationId": "com.tapstory.app.dev"
       }
     },
     "development-simulator": {

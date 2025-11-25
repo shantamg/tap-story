@@ -201,8 +201,11 @@ export class AudioRecorder {
       const { uploadUrl, key } = await uploadUrlResponse.json();
 
       // Upload file to S3
+      const blobStart = Date.now();
       const fileBlob = await fetch(uri).then(r => r.blob());
+      console.log(`[AudioRecorder] Blob created in ${Date.now() - blobStart}ms, size: ${fileBlob.size} bytes`);
 
+      const uploadStart = Date.now();
       const uploadResponse = await fetch(uploadUrl, {
         method: 'PUT',
         body: fileBlob,
@@ -210,6 +213,7 @@ export class AudioRecorder {
           'Content-Type': contentType,
         },
       });
+      console.log(`[AudioRecorder] S3 upload completed in ${Date.now() - uploadStart}ms, status: ${uploadResponse.status}`);
 
       if (!uploadResponse.ok) {
         throw new Error('Failed to upload to S3');
