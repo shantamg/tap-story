@@ -9,7 +9,7 @@ import { CassettePlayerControls } from './CassettePlayerControls';
 import { AudioTimeline } from './AudioTimeline';
 import { SavedChainsList } from './SavedChainsList';
 import { getApiUrl } from '../utils/api';
-import { saveRecordingLocally, saveLatencyOffset, getLatencyOffset } from '../services/audioStorage';
+import { saveRecordingLocally, saveLatencyOffset, getLatencyOffset, localAudioExists, downloadAndCacheAudio } from '../services/audioStorage';
 import { colors } from '../utils/theme';
 import { LatencyNudge } from './LatencyNudge';
 
@@ -222,8 +222,10 @@ export function DuetRecorderWithTrackPlayer() {
   }, [fetchSavedChains]);
 
   async function loadChain(chainId: string) {
+    setIsLoading(true);
+    const newDownloadingIds = new Set<string>();
+
     try {
-      setIsLoading(true);
       console.log('[DuetRecorder] Loading chain:', chainId);
 
       const response = await fetch(`${getApiUrl()}/api/audio/tree/${chainId}`);
@@ -253,13 +255,49 @@ export function DuetRecorderWithTrackPlayer() {
         chain.push({ ...node, startTime });
       }
 
+      // Check which segments need downloading
+      for (const segment of chain) {
+        const hasLocal = await localAudioExists(segment.id);
+        if (!hasLocal) {
+          newDownloadingIds.add(segment.id);
+        }
+      }
+
+      setDownloadingSegmentIds(newDownloadingIds);
+      setIsDownloadingAudio(newDownloadingIds.size > 0);
       setAudioChain(chain);
       setCurrentNodeId(chainId);
       setViewMode('detail');
 
       await player.current.cleanup();
+
+      // Download missing audio in parallel
+      if (newDownloadingIds.size > 0) {
+        await Promise.all(
+          Array.from(newDownloadingIds).map(async (segmentId) => {
+            try {
+              const segment = chain.find(s => s.id === segmentId);
+              if (segment) {
+                await downloadAndCacheAudio(segment.audioUrl, segment.id);
+                setDownloadingSegmentIds(prev => {
+                  const next = new Set(prev);
+                  next.delete(segmentId);
+                  return next;
+                });
+              }
+            } catch (error) {
+              console.error(`Failed to download segment ${segmentId}:`, error);
+              // Keep in downloading set to show error state
+            }
+          })
+        );
+        setIsDownloadingAudio(false);
+      }
+
     } catch (error) {
       console.error('[DuetRecorder] Failed to load chain:', error);
+      setDownloadingSegmentIds(new Set());
+      setIsDownloadingAudio(false);
     } finally {
       setIsLoading(false);
     }
