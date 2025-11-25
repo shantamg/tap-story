@@ -52,6 +52,80 @@ router.post('/save', async (req: Request, res: Response) => {
   }
 });
 
+// List all audio chains (leaf nodes - nodes with no children) with segment data for preview
+router.get('/chains', async (req: Request, res: Response) => {
+  try {
+    // Find all leaf nodes (nodes that are not a parent of any other node)
+    const leafNodes = await prisma.audioNode.findMany({
+      where: {
+        children: {
+          none: {},
+        },
+      },
+      orderBy: {
+        createdAt: 'desc',
+      },
+    });
+
+    // For each leaf, get the full chain with segments
+    const chains = await Promise.all(
+      leafNodes.map(async (leaf) => {
+        // Traverse to get all ancestors
+        const segments: Array<{ id: string; duration: number; parentId: string | null }> = [];
+        let currentId: string | null = leaf.id;
+
+        while (currentId) {
+          const node: { id: string; duration: number; parentId: string | null } | null = await prisma.audioNode.findUnique({
+            where: { id: currentId },
+            select: { id: true, duration: true, parentId: true },
+          });
+          if (!node) break;
+          segments.unshift(node); // Add to front to maintain order (oldest first)
+          currentId = node.parentId;
+        }
+
+        // Calculate start times for each segment based on duet rules (iterative)
+        const segmentsWithStartTimes: Array<{ id: string; duration: number; parentId: string | null; startTime: number }> = [];
+        for (let index = 0; index < segments.length; index++) {
+          const seg = segments[index];
+          let startTime = 0;
+
+          if (index === 0) {
+            startTime = 0;
+          } else if (index === 1) {
+            startTime = 0; // Second recording duets with first
+          } else {
+            // Find earliest end time among previous segments
+            const endTimes = segmentsWithStartTimes.map(s => s.startTime + s.duration);
+            const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
+            startTime = sortedEndTimes[index - 2]; // Second-to-last end time
+          }
+
+          segmentsWithStartTimes.push({ ...seg, startTime });
+        }
+
+        // Calculate total timeline duration
+        const totalDuration = segmentsWithStartTimes.length > 0
+          ? Math.max(...segmentsWithStartTimes.map(s => s.startTime + s.duration))
+          : 0;
+
+        return {
+          id: leaf.id,
+          chainLength: segments.length,
+          totalDuration,
+          createdAt: leaf.createdAt,
+          segments: segmentsWithStartTimes,
+        };
+      })
+    );
+
+    res.json({ chains });
+  } catch (error) {
+    console.error('List chains error:', error);
+    res.status(500).json({ error: 'Failed to list chains' });
+  }
+});
+
 // Get audio tree for playback (ancestor chain)
 router.get('/tree/:id', async (req: Request, res: Response) => {
   try {

@@ -1,9 +1,10 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Button, Alert, ScrollView } from 'react-native';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { View, Text, StyleSheet, Button, Alert } from 'react-native';
 import { AudioRecorder } from '../services/audioService';
 import { DuetPlayer } from '../services/duetPlayer';
 import { RecordButton } from './RecordButton';
 import { AudioTimeline } from './AudioTimeline';
+import { SavedChainsList } from './SavedChainsList';
 import { getApiUrl } from '../utils/api';
 import { saveRecordingLocally, getLocalAudioPath } from '../services/audioStorage';
 
@@ -16,23 +17,57 @@ interface AudioChainNode {
   parentId: string | null;
 }
 
+interface ChainSegment {
+  id: string;
+  duration: number;
+  startTime: number;
+  parentId: string | null;
+}
+
+interface ChainSummary {
+  id: string;
+  chainLength: number;
+  totalDuration: number;
+  createdAt: string;
+  segments: ChainSegment[];
+}
+
 export function DuetRecorder() {
   const [isRecording, setIsRecording] = useState(false);
+  const [isWaitingToRecord, setIsWaitingToRecord] = useState(false);  // Playing back, waiting for punch-in
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [audioChain, setAudioChain] = useState<AudioChainNode[]>([]);
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
+  const [currentPosition, setCurrentPosition] = useState(0);
+  const [recordingDuration, setRecordingDuration] = useState(0);  // Current recording length in seconds
+
+  // Saved chains state
+  const [savedChains, setSavedChains] = useState<ChainSummary[]>([]);
+  const [isLoadingChains, setIsLoadingChains] = useState(false);
+
+  // View state: 'list' or 'detail'
+  const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
 
   const recorder = useRef(new AudioRecorder());
   const player = useRef(new DuetPlayer());
   const recordingStartTimestamp = useRef(0);
   const recordingStartTimeInChain = useRef(0);  // When in the chain timeline this recording starts
+  const positionInterval = useRef<NodeJS.Timeout | null>(null);
+  const recordingDurationInterval = useRef<NodeJS.Timeout | null>(null);
 
   useEffect(() => {
     initAudio();
+    fetchSavedChains();
     return () => {
       recorder.current.cleanup();
       player.current.cleanup();
+      if (positionInterval.current) {
+        clearInterval(positionInterval.current);
+      }
+      if (recordingDurationInterval.current) {
+        clearInterval(recordingDurationInterval.current);
+      }
     };
   }, []);
 
@@ -41,6 +76,87 @@ export function DuetRecorder() {
       await recorder.current.init();
     } catch (error) {
       Alert.alert('Error', 'Failed to initialize audio. Please grant microphone permissions.');
+    }
+  }
+
+  const fetchSavedChains = useCallback(async () => {
+    try {
+      setIsLoadingChains(true);
+      const response = await fetch(`${getApiUrl()}/api/audio/chains`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch chains');
+      }
+      const data = await response.json();
+      setSavedChains(data.chains);
+    } catch (error) {
+      console.error('[DuetRecorder] Failed to fetch chains:', error);
+    } finally {
+      setIsLoadingChains(false);
+    }
+  }, []);
+
+  async function loadChain(chainId: string) {
+    try {
+      setIsLoading(true);
+      console.log('[DuetRecorder] Loading chain:', chainId);
+
+      // Fetch the chain tree from the API
+      const response = await fetch(`${getApiUrl()}/api/audio/tree/${chainId}`);
+      if (!response.ok) {
+        throw new Error('Failed to fetch chain');
+      }
+      const data = await response.json();
+      const ancestors: Array<{
+        id: string;
+        audioUrl: string;
+        parentId: string | null;
+        duration: number;
+      }> = data.ancestors;
+
+      console.log('[DuetRecorder] Loaded ancestors:', ancestors.length);
+
+      // Calculate start times iteratively based on duet rules
+      const chain: AudioChainNode[] = [];
+      for (let i = 0; i < ancestors.length; i++) {
+        const node = ancestors[i];
+        let startTime = 0;
+
+        if (i === 0) {
+          // First recording starts at 0
+          startTime = 0;
+        } else if (i === 1) {
+          // Second recording also starts at 0 (duet with first)
+          startTime = 0;
+        } else {
+          // For 3rd+ recording: find the earliest end time among previous segments
+          const endTimes = chain.map(seg => seg.startTime + seg.duration);
+          const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
+          startTime = sortedEndTimes[i - 2]; // Second-to-last end time
+        }
+
+        chain.push({
+          ...node,
+          startTime,
+        });
+      }
+
+      console.log('[DuetRecorder] Chain with start times:', chain.map(n => ({
+        id: n.id.slice(0, 8),
+        duration: n.duration,
+        startTime: n.startTime,
+      })));
+
+      setAudioChain(chain);
+      setCurrentNodeId(chainId);
+      setViewMode('detail');  // Switch to detail view
+
+      // Cleanup player
+      await player.current.cleanup();
+    } catch (error) {
+      console.error('[DuetRecorder] Failed to load chain:', error);
+      Alert.alert('Error', 'Failed to load story');
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -100,11 +216,20 @@ export function DuetRecorder() {
         console.log('[DuetRecorder] Loading chain for playback:', audioChain.map(n => ({ id: n.id, duration: n.duration, startTime: n.startTime })));
         await player.current.loadChain(audioChain);
 
+        // Start position tracking for the timeline
+        setCurrentPosition(0);
+        startPositionTracking();
+
+        // Set waiting state - we're playing back, waiting to record
+        setIsWaitingToRecord(true);
+        setIsLoading(false);
+
         // Start playback from beginning
         console.log('[DuetRecorder] Starting playback from 0');
         player.current.playFrom(0, recordingStartTimeInChain.current, () => {
           // Callback when it's time to start recording
           console.log('[DuetRecorder] Reached recording start point, beginning recording');
+          setIsWaitingToRecord(false);
           actuallyStartRecording();
         });
         setIsPlaying(true);
@@ -116,6 +241,7 @@ export function DuetRecorder() {
       console.error('[DuetRecorder] Failed to start recording:', error);
       Alert.alert('Error', 'Failed to start recording');
       setIsLoading(false);
+      setIsWaitingToRecord(false);
     }
   }
 
@@ -130,6 +256,13 @@ export function DuetRecorder() {
       await recorder.current.startRecording();
       console.log('[DuetRecorder] Recording started successfully');
       setIsRecording(true);
+      setRecordingDuration(0);
+
+      // Start tracking recording duration
+      recordingDurationInterval.current = setInterval(() => {
+        const elapsed = (Date.now() - recordingStartTimestamp.current) / 1000;
+        setRecordingDuration(elapsed);
+      }, 100);
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
       Alert.alert('Error', 'Failed to start recording');
@@ -143,11 +276,18 @@ export function DuetRecorder() {
       setIsLoading(true);
       console.log('[DuetRecorder] Stopping duet recording');
 
+      // Stop recording duration tracking
+      if (recordingDurationInterval.current) {
+        clearInterval(recordingDurationInterval.current);
+        recordingDurationInterval.current = null;
+      }
+
       // Stop recording - get temp URI
       console.log('[DuetRecorder] Calling recorder.stopRecording()');
       const tempUri = await recorder.current.stopRecording();
       console.log('[DuetRecorder] Recording stopped, tempUri:', tempUri);
       setIsRecording(false);
+      setRecordingDuration(0);
 
       // Stop playback if playing
       if (isPlaying) {
@@ -155,6 +295,7 @@ export function DuetRecorder() {
         await player.current.stop();
         setIsPlaying(false);
       }
+      stopPositionTracking();
 
       // Calculate duration from timestamp
       const duration = Math.ceil((Date.now() - recordingStartTimestamp.current) / 1000);
@@ -226,8 +367,58 @@ export function DuetRecorder() {
   async function resetChain() {
     setAudioChain([]);
     setCurrentNodeId(null);
+    setViewMode('list');  // Return to list view
     await player.current.cleanup();
-    Alert.alert('Reset', 'Starting fresh recording chain');
+    fetchSavedChains(); // Refresh the list in case we saved something
+  }
+
+  function startNewStory() {
+    setAudioChain([]);
+    setCurrentNodeId(null);
+    setViewMode('detail');  // Go to detail view for new recording
+  }
+
+  async function goBackToList() {
+    // Stop any playback and release resources
+    if (isPlaying) {
+      await player.current.stop();
+      setIsPlaying(false);
+    }
+    stopPositionTracking();
+    await player.current.cleanup();
+
+    setViewMode('list');
+    fetchSavedChains(); // Refresh the list
+  }
+
+  async function stopPlayback() {
+    if (isPlaying) {
+      console.log('[DuetRecorder] Stopping playback');
+      await player.current.stop();
+      setIsPlaying(false);
+      stopPositionTracking();
+    }
+  }
+
+  function startPositionTracking() {
+    // Clear any existing interval
+    if (positionInterval.current) {
+      clearInterval(positionInterval.current);
+    }
+
+    // Update position every 100ms
+    positionInterval.current = setInterval(async () => {
+      const pos = await player.current.getCurrentPosition();
+      setCurrentPosition(pos);
+    }, 100);
+  }
+
+  function stopPositionTracking() {
+    if (positionInterval.current) {
+      clearInterval(positionInterval.current);
+      positionInterval.current = null;
+    }
+    setCurrentPosition(0);
   }
 
   async function playFullChain() {
@@ -236,14 +427,20 @@ export function DuetRecorder() {
       return;
     }
 
+    await playFromPosition(0);
+  }
+
+  async function playFromPosition(startPosition: number) {
     try {
-      console.log('[DuetRecorder] Playing full chain, segments:', audioChain.map(n => ({ id: n.id, duration: n.duration, localUri: n.localUri?.slice(-20) })));
+      console.log('[DuetRecorder] Playing from position:', startPosition);
       setIsLoading(true);
       await player.current.loadChain(audioChain);
       console.log('[DuetRecorder] Chain loaded, starting playback');
-      setIsLoading(false); // Loading done, now playing
+      setIsLoading(false);
       setIsPlaying(true);
-      await player.current.playFrom(0);
+      setCurrentPosition(startPosition);
+      startPositionTracking();
+      await player.current.playFrom(startPosition);
       console.log('[DuetRecorder] Playback complete');
     } catch (error) {
       console.error('[DuetRecorder] Playback error:', error);
@@ -251,50 +448,51 @@ export function DuetRecorder() {
     } finally {
       setIsPlaying(false);
       setIsLoading(false);
+      stopPositionTracking();
     }
   }
 
+  async function handleSegmentTap(segment: { id: string; startTime: number }) {
+    if (isRecording) return; // Don't allow during recording
+    await playFromPosition(segment.startTime);
+  }
+
+  // LIST VIEW - Shows saved stories
+  if (viewMode === 'list') {
+    return (
+      <View style={styles.listContainer}>
+        <View style={styles.listHeader}>
+          <Text style={styles.title}>Tap Story</Text>
+          <Text style={styles.subtitle}>Your Stories</Text>
+        </View>
+
+        <View style={styles.newStoryButton}>
+          <Button title="+ New Story" onPress={startNewStory} />
+        </View>
+
+        <View style={styles.savedChainsFullContainer}>
+          <SavedChainsList
+            chains={savedChains}
+            isLoading={isLoadingChains}
+            selectedChainId={null}
+            onSelectChain={loadChain}
+            onRefresh={fetchSavedChains}
+          />
+        </View>
+      </View>
+    );
+  }
+
+  // DETAIL VIEW - Recording/Playback interface
   return (
-    <ScrollView style={styles.scrollContainer} contentContainerStyle={styles.scrollContent}>
-      <View style={styles.container}>
-        <Text style={styles.title}>Tap Story</Text>
-        <Text style={styles.subtitle}>Duet Mode</Text>
+    <View style={styles.detailContainer}>
+      {/* Back button */}
+      <View style={styles.backButtonContainer}>
+        <Button title="< Back" onPress={goBackToList} disabled={isLoading || isRecording} />
+      </View>
 
-        <View style={styles.info}>
-          <Text style={styles.chainInfo}>Chain Length: {audioChain.length} segments</Text>
-          {audioChain.length > 0 && (
-            <Text style={styles.duration}>
-              Total Duration: {player.current.getTotalDuration()}s
-            </Text>
-          )}
-          {isRecording && isPlaying && (
-            <Text style={styles.recordingText}>🔴 Recording while playing...</Text>
-          )}
-          {isPlaying && !isRecording && (
-            <Text style={styles.playing}>▶️ Playing...</Text>
-          )}
-          {isRecording && !isPlaying && (
-            <Text style={styles.recordingText}>🔴 Recording...</Text>
-          )}
-        </View>
-
-        <RecordButton
-          isRecording={isRecording}
-          isLoading={isLoading}
-          onPress={handleRecordPress}
-        />
-
-        <View style={styles.controls}>
-          {audioChain.length > 0 && (
-            <>
-              <Button title="Play All" onPress={playFullChain} disabled={isLoading || isRecording} />
-              <View style={styles.buttonSpacer} />
-            </>
-          )}
-          <Button title="Reset Chain" onPress={resetChain} disabled={isLoading || isRecording} />
-        </View>
-
-        {/* Audio Timeline Visualization */}
+      {/* Timeline takes full width */}
+      <View style={styles.timelineFullWidth}>
         <AudioTimeline
           segments={audioChain.map(node => ({
             id: node.id,
@@ -302,38 +500,96 @@ export function DuetRecorder() {
             startTime: node.startTime,
             parentId: node.parentId,
           }))}
-          pixelsPerSecond={10}
+          onSegmentTap={handleSegmentTap}
+          isRecording={isRecording}
+          recordingStartTime={recordingStartTimeInChain.current}
+          recordingDuration={recordingDuration}
         />
+      </View>
 
-        {audioChain.length === 0 && (
-          <Text style={styles.hint}>
-            Press Record to start your first recording.
-          </Text>
+      {/* Status info */}
+      <View style={styles.info}>
+        <Text style={styles.chainInfo}>
+          {audioChain.length} {audioChain.length === 1 ? 'segment' : 'segments'}
+        </Text>
+        {isRecording && isPlaying && (
+          <Text style={styles.recordingText}>Recording while playing...</Text>
         )}
-        {audioChain.length > 0 && (
-          <Text style={styles.hint}>
-            Press Record to add to the chain. Previous audio will play while you record.
-          </Text>
+        {isPlaying && !isRecording && (
+          <Text style={styles.playing}>Playing...</Text>
+        )}
+        {isRecording && !isPlaying && (
+          <Text style={styles.recordingText}>Recording...</Text>
         )}
       </View>
-    </ScrollView>
+
+      {/* Record button */}
+      <RecordButton
+        isRecording={isRecording}
+        isWaitingToRecord={isWaitingToRecord}
+        isLoading={isLoading}
+        onPress={handleRecordPress}
+      />
+
+      {/* Playback controls */}
+      <View style={styles.controls}>
+        {audioChain.length > 0 && !isPlaying && (
+          <Button title="Play All" onPress={playFullChain} disabled={isLoading || isRecording} />
+        )}
+        {isPlaying && (
+          <Button title="Stop" onPress={stopPlayback} color="#FF3B30" />
+        )}
+      </View>
+
+      {/* Hint text */}
+      {audioChain.length === 0 && (
+        <Text style={styles.hint}>
+          Tap the record button to start your first recording.
+        </Text>
+      )}
+      {audioChain.length > 0 && (
+        <Text style={styles.hint}>
+          Tap record to add to the story. Previous audio will play while you record.
+        </Text>
+      )}
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  scrollContainer: {
+  // LIST VIEW styles
+  listContainer: {
     flex: 1,
+    paddingTop: 60,
+    paddingHorizontal: 20,
   },
-  scrollContent: {
-    flexGrow: 1,
-    justifyContent: 'center',
-  },
-  container: {
-    flex: 1,
-    justifyContent: 'center',
+  listHeader: {
     alignItems: 'center',
-    padding: 20,
+    marginBottom: 20,
   },
+  newStoryButton: {
+    marginBottom: 20,
+  },
+  savedChainsFullContainer: {
+    flex: 1,
+  },
+
+  // DETAIL VIEW styles
+  detailContainer: {
+    flex: 1,
+    paddingTop: 60,
+  },
+  backButtonContainer: {
+    paddingHorizontal: 20,
+    marginBottom: 20,
+    alignItems: 'flex-start',
+  },
+  timelineFullWidth: {
+    width: '100%',
+    // No padding - let timeline handle its own if needed
+  },
+
+  // Shared styles
   title: {
     fontSize: 32,
     fontWeight: 'bold',
@@ -342,37 +598,30 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 18,
     color: '#666',
-    marginBottom: 30,
   },
   info: {
-    marginBottom: 30,
+    paddingHorizontal: 20,
+    marginTop: 20,
     alignItems: 'center',
   },
   chainInfo: {
     fontSize: 16,
     color: '#333',
   },
-  duration: {
-    fontSize: 14,
-    color: '#666',
-    marginTop: 4,
-  },
   playing: {
     color: '#007AFF',
-    marginTop: 10,
+    marginTop: 8,
     fontWeight: '500',
   },
   recordingText: {
     color: '#FF3B30',
-    marginTop: 10,
+    marginTop: 8,
     fontWeight: '600',
   },
   controls: {
-    marginTop: 30,
+    marginTop: 20,
     alignItems: 'center',
-  },
-  buttonSpacer: {
-    height: 10,
+    paddingHorizontal: 20,
   },
   hint: {
     marginTop: 20,

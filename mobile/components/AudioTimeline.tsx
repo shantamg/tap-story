@@ -1,5 +1,6 @@
-import React from 'react';
-import { View, ScrollView, Text, StyleSheet } from 'react-native';
+import React, { useRef, useCallback, useState } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, LayoutChangeEvent, ScrollView } from 'react-native';
+import { GestureDetector, Gesture } from 'react-native-gesture-handler';
 
 interface AudioSegment {
   id: string;
@@ -10,7 +11,11 @@ interface AudioSegment {
 
 interface AudioTimelineProps {
   segments: AudioSegment[];
-  pixelsPerSecond?: number;
+  onSegmentTap?: (segment: AudioSegment) => void;
+  // Recording state
+  isRecording?: boolean;
+  recordingStartTime?: number;  // When the current recording starts in the timeline
+  recordingDuration?: number;   // How long we've been recording (seconds)
 }
 
 // Colors for each track (cycling if more than available)
@@ -19,82 +24,159 @@ const TRACK_COLORS = [
   '#FF9500', // Orange
   '#34C759', // Green
   '#AF52DE', // Purple
-  '#FF3B30', // Red
   '#5AC8FA', // Light Blue
   '#FFCC00', // Yellow
   '#FF2D55', // Pink
 ];
 
-export function AudioTimeline({ segments, pixelsPerSecond = 10 }: AudioTimelineProps) {
-  if (segments.length === 0) {
+const MIN_WIDTH_PX = 30; // Minimum segment width in pixels
+
+export function AudioTimeline({
+  segments,
+  onSegmentTap,
+  isRecording = false,
+  recordingStartTime = 0,
+  recordingDuration = 0,
+}: AudioTimelineProps) {
+  const [containerWidth, setContainerWidth] = useState(300);
+  const [zoomScale, setZoomScale] = useState(1); // 1 = auto-fit, >1 = zoomed in
+  const baseZoomScale = useRef(1);
+  const scrollViewRef = useRef<ScrollView>(null);
+
+  // Check if we should show timeline
+  const shouldShow = segments.length > 0 || isRecording;
+
+  // Calculate the "anchor" duration - the farthest any saved segment extends
+  // This is what determines the scale, NOT the current recording (until it exceeds this)
+  const savedSegmentEndTimes = segments.map(seg => seg.startTime + seg.duration);
+  const maxSavedEndTime = savedSegmentEndTimes.length > 0 ? Math.max(...savedSegmentEndTimes) : 0;
+
+  // Current recording end time
+  const recordingEndTime = isRecording ? recordingStartTime + recordingDuration : 0;
+
+  // The timeline scale is based on whichever is larger:
+  // - The max saved segment end time
+  // - The current recording end time (only if it exceeds saved segments)
+  // This means: first recording = always full width, second recording doesn't shrink first until it's longer
+  const timelineDuration = Math.max(1, maxSavedEndTime, recordingEndTime);
+
+  // Handle container layout to get width
+  const onContainerLayout = useCallback((event: LayoutChangeEvent) => {
+    setContainerWidth(event.nativeEvent.layout.width);
+  }, []);
+
+  // Pinch gesture for zooming
+  const pinchGesture = Gesture.Pinch()
+    .onStart(() => {
+      baseZoomScale.current = zoomScale;
+    })
+    .onUpdate((event) => {
+      const newScale = Math.max(1, Math.min(10, baseZoomScale.current * event.scale));
+      setZoomScale(newScale);
+    });
+
+  // Double-tap to reset zoom
+  const doubleTapGesture = Gesture.Tap()
+    .numberOfTaps(2)
+    .onEnd(() => {
+      setZoomScale(1);
+    });
+
+  const composedGesture = Gesture.Race(pinchGesture, doubleTapGesture);
+
+  // Early return AFTER all hooks
+  if (!shouldShow) {
     return null;
   }
 
-  // Calculate total duration (latest end time)
-  const totalDuration = Math.max(...segments.map(seg => seg.startTime + seg.duration));
-  const timelineWidth = Math.max(totalDuration * pixelsPerSecond, 200);
+  // Calculate available width for timeline content (full width, no padding)
+  const availableWidth = containerWidth * zoomScale;
 
-  // Generate time markers every 5 seconds
-  const timeMarkers: number[] = [];
-  for (let t = 0; t <= totalDuration; t += 5) {
-    timeMarkers.push(t);
-  }
+  // Helper to convert time to pixel width
+  const timeToWidth = (duration: number): number => {
+    const width = (duration / timelineDuration) * availableWidth;
+    return Math.max(width, MIN_WIDTH_PX);
+  };
+
+  // Helper to convert time to pixel position
+  const timeToLeft = (startTime: number): number => {
+    return (startTime / timelineDuration) * availableWidth;
+  };
+
+  const content = (
+    <View style={[styles.tracksContainer, { width: availableWidth }]}>
+      {segments.map((segment, index) => {
+        const width = timeToWidth(segment.duration);
+        const left = timeToLeft(segment.startTime);
+        const color = TRACK_COLORS[index % TRACK_COLORS.length];
+
+        return (
+          <View key={segment.id} style={styles.trackRow}>
+            <TouchableOpacity
+              onPress={() => onSegmentTap?.(segment)}
+              activeOpacity={0.7}
+              style={[
+                styles.segmentBar,
+                {
+                  width,
+                  marginLeft: left,
+                  backgroundColor: color,
+                },
+              ]}
+            >
+              <Text style={styles.segmentText} numberOfLines={1}>
+                {segment.duration}s
+              </Text>
+            </TouchableOpacity>
+          </View>
+        );
+      })}
+
+      {/* Growing recording segment */}
+      {isRecording && (
+        <View style={styles.trackRow}>
+          <View
+            style={[
+              styles.segmentBar,
+              styles.recordingSegment,
+              {
+                width: timeToWidth(recordingDuration),
+                marginLeft: timeToLeft(recordingStartTime),
+                backgroundColor: '#FF3B30', // Red for recording
+              },
+            ]}
+          >
+            <Text style={styles.segmentText} numberOfLines={1}>
+              {recordingDuration.toFixed(1)}s
+            </Text>
+          </View>
+        </View>
+      )}
+    </View>
+  );
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Timeline ({segments.length} segments, {totalDuration}s total)</Text>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={true}
-        style={styles.scrollView}
-        contentContainerStyle={[styles.scrollContent, { width: timelineWidth + 60 }]}
-      >
-        {/* Time markers */}
-        <View style={[styles.timeMarkers, { width: timelineWidth, marginLeft: 40 }]}>
-          {timeMarkers.map((time) => (
-            <View
-              key={time}
-              style={[styles.timeMarker, { left: time * pixelsPerSecond }]}
-            >
-              <View style={styles.markerLine} />
-              <Text style={styles.markerText}>{time}s</Text>
-            </View>
-          ))}
-        </View>
-
-        {/* Audio segments as horizontal bars with absolute positioning */}
-        <View style={styles.tracksContainer}>
-          {segments.map((segment, index) => {
-            const width = segment.duration * pixelsPerSecond;
-            const left = segment.startTime * pixelsPerSecond;
-            const color = TRACK_COLORS[index % TRACK_COLORS.length];
-
-            return (
-              <View key={segment.id} style={styles.trackRow}>
-                <View style={styles.trackLabel}>
-                  <Text style={styles.trackLabelText}>#{index + 1}</Text>
-                </View>
-                <View style={[styles.trackContent, { width: timelineWidth }]}>
-                  <View
-                    style={[
-                      styles.segmentBar,
-                      {
-                        width: Math.max(width, 20),
-                        marginLeft: left,
-                        backgroundColor: color,
-                      },
-                    ]}
-                  >
-                    <Text style={styles.segmentText} numberOfLines={1}>
-                      {segment.startTime}-{segment.startTime + segment.duration}s
-                    </Text>
-                  </View>
-                </View>
-              </View>
-            );
-          })}
-        </View>
-      </ScrollView>
+    <View style={styles.container} onLayout={onContainerLayout}>
+      <GestureDetector gesture={composedGesture}>
+        {zoomScale > 1 ? (
+          <ScrollView
+            ref={scrollViewRef}
+            horizontal
+            showsHorizontalScrollIndicator={true}
+            style={styles.scrollView}
+            contentContainerStyle={styles.scrollContent}
+          >
+            {content}
+          </ScrollView>
+        ) : (
+          <View style={styles.scrollContent}>
+            {content}
+          </View>
+        )}
+      </GestureDetector>
+      {zoomScale > 1 && (
+        <Text style={styles.zoomHint}>Double-tap to reset zoom</Text>
+      )}
     </View>
   );
 }
@@ -102,73 +184,43 @@ export function AudioTimeline({ segments, pixelsPerSecond = 10 }: AudioTimelineP
 const styles = StyleSheet.create({
   container: {
     marginVertical: 16,
-    width: '100%',
-  },
-  title: {
-    fontSize: 14,
-    fontWeight: '600',
-    marginBottom: 8,
-    color: '#333',
-    paddingHorizontal: 16,
+    // No horizontal padding - segments go edge to edge
   },
   scrollView: {
-    maxHeight: 300,
+    flexGrow: 0,
   },
   scrollContent: {
-    paddingHorizontal: 16,
-    paddingBottom: 16,
-  },
-  timeMarkers: {
-    height: 24,
-    position: 'relative',
-    marginBottom: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: '#ddd',
-  },
-  timeMarker: {
-    position: 'absolute',
-    alignItems: 'center',
-  },
-  markerLine: {
-    width: 1,
-    height: 8,
-    backgroundColor: '#999',
-  },
-  markerText: {
-    fontSize: 10,
-    color: '#666',
-    marginTop: 2,
+    paddingVertical: 4,
   },
   tracksContainer: {
-    gap: 8,
+    gap: 6,
   },
   trackRow: {
     flexDirection: 'row',
     alignItems: 'center',
     height: 32,
   },
-  trackLabel: {
-    width: 30,
-    marginRight: 8,
-  },
-  trackContent: {
-    height: 24,
-  },
-  trackLabelText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#666',
-  },
   segmentBar: {
-    height: 24,
+    height: 28,
     borderRadius: 4,
     justifyContent: 'center',
-    paddingHorizontal: 8,
-    minWidth: 20,
+    alignItems: 'center',
+    paddingHorizontal: 6,
   },
   segmentText: {
     color: 'white',
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '600',
+  },
+  recordingSegment: {
+    borderWidth: 2,
+    borderColor: '#fff',
+    opacity: 0.9,
+  },
+  zoomHint: {
+    textAlign: 'center',
+    fontSize: 10,
+    color: '#999',
+    marginTop: 4,
   },
 });
