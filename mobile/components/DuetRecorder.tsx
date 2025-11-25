@@ -2,11 +2,12 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, Button, Alert } from 'react-native';
 import { AudioRecorder } from '../services/audioService';
 import { DuetPlayer } from '../services/duetPlayer';
-import { RecordButton } from './RecordButton';
+import { CassettePlayerControls } from './CassettePlayerControls';
 import { AudioTimeline } from './AudioTimeline';
 import { SavedChainsList } from './SavedChainsList';
 import { getApiUrl } from '../utils/api';
 import { saveRecordingLocally, getLocalAudioPath } from '../services/audioStorage';
+import { colors } from '../utils/theme';
 
 interface AudioChainNode {
   id: string;
@@ -41,6 +42,7 @@ export function DuetRecorder() {
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [currentPosition, setCurrentPosition] = useState(0);
   const [recordingDuration, setRecordingDuration] = useState(0);  // Current recording length in seconds
+  const [seekPreviewPosition, setSeekPreviewPosition] = useState<number | null>(null);
 
   // Saved chains state
   const [savedChains, setSavedChains] = useState<ChainSummary[]>([]);
@@ -128,10 +130,11 @@ export function DuetRecorder() {
           // Second recording also starts at 0 (duet with first)
           startTime = 0;
         } else {
-          // For 3rd+ recording: find the earliest end time among previous segments
+          // For 3rd+ recording: start at the end of the next-to-most-recent recording
           const endTimes = chain.map(seg => seg.startTime + seg.duration);
           const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
-          startTime = sortedEndTimes[i - 2]; // Second-to-last end time
+          // For N recordings, we want the (N-2)th end time (second-to-last)
+          startTime = sortedEndTimes[i - 2];
         }
 
         chain.push({
@@ -185,21 +188,17 @@ export function DuetRecorder() {
       return 0;
     }
 
-    // For 3rd+ recording: find the oldest track that's still playing at the current end
-    // Sort by end time (startTime + duration) and return the earliest end time
+    // For 3rd+ recording: start at the end of the next-to-most-recent recording
+    // Sort by end time (startTime + duration)
     const endTimes = audioChain.map(seg => seg.startTime + seg.duration);
     const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
 
-    // The next recording starts when the OLDEST track ends
-    // But we need to find which track ends first that hasn't been "used" yet
-    // Actually simpler: the recording starts at the END of the track that ends earliest
-    // among tracks that are still "active" at that point
+    // The next recording starts at the end of the next-to-most-recent recording
+    // For N recordings, we want the (N-2)th end time (second-to-last)
+    const nextToMostRecentEndTime = sortedEndTimes[audioChain.length - 2];
 
-    // Find the minimum end time - that's when the next recording starts
-    const earliestEndTime = sortedEndTimes[audioChain.length - 2]; // Second-to-last end time
-
-    console.log('[DuetRecorder] End times:', endTimes, 'Next recording starts at:', earliestEndTime);
-    return earliestEndTime;
+    console.log('[DuetRecorder] End times:', endTimes, 'Next recording starts at:', nextToMostRecentEndTime);
+    return nextToMostRecentEndTime;
   }
 
   async function startDuetRecording() {
@@ -211,28 +210,46 @@ export function DuetRecorder() {
       recordingStartTimeInChain.current = getNextRecordingStartTime();
       console.log('[DuetRecorder] This recording will start at timeline position:', recordingStartTimeInChain.current);
 
-      // If we have a chain, start playback
+      // If we have a chain, start or continue playback
       if (audioChain.length > 0) {
         console.log('[DuetRecorder] Loading chain for playback:', audioChain.map(n => ({ id: n.id, duration: n.duration, startTime: n.startTime })));
         await player.current.loadChain(audioChain);
 
-        // Start position tracking for the timeline
-        setCurrentPosition(0);
-        startPositionTracking();
+        // If not already playing, start playback from current position or beginning
+        if (!isPlaying) {
+          // Start position tracking for the timeline
+          setCurrentPosition(0);
+          startPositionTracking();
 
-        // Set waiting state - we're playing back, waiting to record
-        setIsWaitingToRecord(true);
-        setIsLoading(false);
+          // Set waiting state - we're playing back, waiting to record
+          setIsWaitingToRecord(true);
+          setIsLoading(false);
 
-        // Start playback from beginning
-        console.log('[DuetRecorder] Starting playback from 0');
-        player.current.playFrom(0, recordingStartTimeInChain.current, () => {
-          // Callback when it's time to start recording
-          console.log('[DuetRecorder] Reached recording start point, beginning recording');
-          setIsWaitingToRecord(false);
-          actuallyStartRecording();
-        });
-        setIsPlaying(true);
+          // Start playback from beginning
+          console.log('[DuetRecorder] Starting playback from 0');
+          player.current.playFrom(0, recordingStartTimeInChain.current, () => {
+            // Callback when it's time to start recording
+            console.log('[DuetRecorder] Reached recording start point, beginning recording');
+            setIsWaitingToRecord(false);
+            actuallyStartRecording();
+          });
+          setIsPlaying(true);
+        } else {
+          // Already playing - just set up the callback for when we reach recording time
+          setIsWaitingToRecord(true);
+          setIsLoading(false);
+          
+          // Check if we're already past the recording start time
+          if (currentPosition >= recordingStartTimeInChain.current) {
+            // Already past, start recording immediately
+            setIsWaitingToRecord(false);
+            await actuallyStartRecording();
+          } else {
+            // Set up callback for when we reach the recording start time
+            // The position tracking will check and trigger recording
+            // We'll handle this in the position tracking interval
+          }
+        }
       } else {
         // First recording - start immediately
         await actuallyStartRecording();
@@ -397,6 +414,26 @@ export function DuetRecorder() {
       await player.current.stop();
       setIsPlaying(false);
       stopPositionTracking();
+      setCurrentPosition(0);
+      setSeekPreviewPosition(null);
+    }
+  }
+
+  async function handleRewind() {
+    if (isRecording) return;
+    await handleSeek(0);
+  }
+
+  async function handleFastForward() {
+    if (isRecording) return;
+    // Fast forward to where recording would start (or end of timeline if no recording pending)
+    if (isWaitingToRecord) {
+      await handleSeek(recordingStartTimeInChain.current);
+    } else if (audioChain.length > 0) {
+      // Need to load chain first to get total duration
+      await player.current.loadChain(audioChain);
+      const totalDuration = player.current.getTotalDuration();
+      await handleSeek(totalDuration);
     }
   }
 
@@ -410,6 +447,16 @@ export function DuetRecorder() {
     positionInterval.current = setInterval(async () => {
       const pos = await player.current.getCurrentPosition();
       setCurrentPosition(pos);
+      
+      // Check if we're waiting to record and have reached the recording start time
+      if (isWaitingToRecord && pos >= recordingStartTimeInChain.current) {
+        console.log('[DuetRecorder] Reached recording start point during playback, beginning recording');
+        setIsWaitingToRecord(false);
+        await actuallyStartRecording();
+      }
+      
+      // Check if playback has ended (position stops advancing or reaches end)
+      // The DuetPlayer will handle stopping internally, we just track position
     }, 100);
   }
 
@@ -421,13 +468,18 @@ export function DuetRecorder() {
     setCurrentPosition(0);
   }
 
-  async function playFullChain() {
+  async function playFromPlayhead() {
     if (audioChain.length === 0) {
       Alert.alert('No Audio', 'Record something first!');
       return;
     }
 
-    await playFromPosition(0);
+    const startPosition =
+      seekPreviewPosition !== null
+        ? seekPreviewPosition
+        : currentPosition;
+
+    await playFromPosition(startPosition);
   }
 
   async function playFromPosition(startPosition: number) {
@@ -439,22 +491,93 @@ export function DuetRecorder() {
       setIsLoading(false);
       setIsPlaying(true);
       setCurrentPosition(startPosition);
+      setSeekPreviewPosition(null);
       startPositionTracking();
+      // playFrom returns immediately after setting up playback
+      // Position tracking will continue until playback ends or is stopped
       await player.current.playFrom(startPosition);
-      console.log('[DuetRecorder] Playback complete');
+      console.log('[DuetRecorder] Playback started');
     } catch (error) {
       console.error('[DuetRecorder] Playback error:', error);
       Alert.alert('Error', 'Failed to play audio');
-    } finally {
       setIsPlaying(false);
       setIsLoading(false);
       stopPositionTracking();
     }
+    // Don't stop position tracking here - it should continue during playback
+    // It will be stopped when the user clicks Stop or when playback naturally ends
   }
 
   async function handleSegmentTap(segment: { id: string; startTime: number }) {
     if (isRecording) return; // Don't allow during recording
     await playFromPosition(segment.startTime);
+  }
+
+  // Update visual position during dragging (doesn't actually seek)
+  function handleSeekPreview(position: number) {
+    if (isRecording) return;
+    if (audioChain.length === 0) return;
+    
+    // If waiting to record, only allow seeking before the recording start time
+    if (isWaitingToRecord && position >= recordingStartTimeInChain.current) {
+      position = Math.max(0, recordingStartTimeInChain.current - 0.1);
+    }
+    
+    // Just update the visual position for smooth dragging
+    setCurrentPosition(position);
+    setSeekPreviewPosition(position);
+  }
+
+  // Actually perform the seek (called on drag end or tap)
+  async function handleSeek(position: number) {
+    if (isRecording) return; // Don't allow seeking during recording
+    if (audioChain.length === 0) return; // No audio to seek
+    
+    // If waiting to record, only allow seeking before the recording start time
+    if (isWaitingToRecord && position >= recordingStartTimeInChain.current) {
+      // Clamp to just before recording start time
+      position = Math.max(0, recordingStartTimeInChain.current - 0.1);
+    }
+    
+    try {
+      // Load chain if not already loaded
+      await player.current.loadChain(audioChain);
+      
+      // If currently playing, stop and seek to new position
+      const wasPlaying = isPlaying;
+      if (isPlaying) {
+        await player.current.stop();
+        setIsPlaying(false);
+        stopPositionTracking();
+      }
+      
+      // Update position immediately for visual feedback
+      setCurrentPosition(position);
+      setSeekPreviewPosition(null);
+      
+      // If it was playing before, resume playback from new position
+      if (wasPlaying) {
+        // If waiting to record, set up callback for recording start time
+        if (isWaitingToRecord) {
+          // Start playback from the new position, with callback at recording start time
+          setIsPlaying(true);
+          startPositionTracking();
+          await player.current.playFrom(position, recordingStartTimeInChain.current, () => {
+            console.log('[DuetRecorder] Reached recording start point after seek, beginning recording');
+            setIsWaitingToRecord(false);
+            actuallyStartRecording();
+          });
+        } else {
+          // Normal playback - just start from the new position
+          setIsPlaying(true);
+          startPositionTracking();
+          await player.current.playFrom(position);
+        }
+      }
+    } catch (error) {
+      console.error('[DuetRecorder] Seek error:', error);
+      Alert.alert('Error', 'Failed to seek audio');
+    }
   }
 
   // LIST VIEW - Shows saved stories
@@ -502,8 +625,13 @@ export function DuetRecorder() {
           }))}
           onSegmentTap={handleSegmentTap}
           isRecording={isRecording}
+          isWaitingToRecord={isWaitingToRecord}
           recordingStartTime={recordingStartTimeInChain.current}
           recordingDuration={recordingDuration}
+          currentTimelinePosition={currentPosition}
+          previewTimelinePosition={seekPreviewPosition}
+          onSeek={handleSeek}
+          onSeekPreview={handleSeekPreview}
         />
       </View>
 
@@ -515,31 +643,24 @@ export function DuetRecorder() {
         {isRecording && isPlaying && (
           <Text style={styles.recordingText}>Recording while playing...</Text>
         )}
-        {isPlaying && !isRecording && (
-          <Text style={styles.playing}>Playing...</Text>
-        )}
         {isRecording && !isPlaying && (
           <Text style={styles.recordingText}>Recording...</Text>
         )}
       </View>
 
-      {/* Record button */}
-      <RecordButton
+      {/* Cassette player controls */}
+      <CassettePlayerControls
+        isPlaying={isPlaying}
         isRecording={isRecording}
         isWaitingToRecord={isWaitingToRecord}
         isLoading={isLoading}
-        onPress={handleRecordPress}
+        hasAudio={audioChain.length > 0}
+        onPlay={playFromPlayhead}
+        onStop={stopPlayback}
+        onRecord={handleRecordPress}
+        onRewind={handleRewind}
+        onFastForward={handleFastForward}
       />
-
-      {/* Playback controls */}
-      <View style={styles.controls}>
-        {audioChain.length > 0 && !isPlaying && (
-          <Button title="Play All" onPress={playFullChain} disabled={isLoading || isRecording} />
-        )}
-        {isPlaying && (
-          <Button title="Stop" onPress={stopPlayback} color="#FF3B30" />
-        )}
-      </View>
 
       {/* Hint text */}
       {audioChain.length === 0 && (
@@ -562,6 +683,7 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingTop: 60,
     paddingHorizontal: 20,
+    backgroundColor: colors.background,
   },
   listHeader: {
     alignItems: 'center',
@@ -578,6 +700,7 @@ const styles = StyleSheet.create({
   detailContainer: {
     flex: 1,
     paddingTop: 60,
+    backgroundColor: colors.background,
   },
   backButtonContainer: {
     paddingHorizontal: 20,
@@ -594,10 +717,11 @@ const styles = StyleSheet.create({
     fontSize: 32,
     fontWeight: 'bold',
     marginBottom: 4,
+    color: colors.textPrimary,
   },
   subtitle: {
     fontSize: 18,
-    color: '#666',
+    color: colors.textSecondary,
   },
   info: {
     paddingHorizontal: 20,
@@ -606,15 +730,15 @@ const styles = StyleSheet.create({
   },
   chainInfo: {
     fontSize: 16,
-    color: '#333',
+    color: colors.textPrimary,
   },
   playing: {
-    color: '#007AFF',
+    color: colors.primary,
     marginTop: 8,
     fontWeight: '500',
   },
   recordingText: {
-    color: '#FF3B30',
+    color: colors.recording,
     marginTop: 8,
     fontWeight: '600',
   },
@@ -625,7 +749,7 @@ const styles = StyleSheet.create({
   },
   hint: {
     marginTop: 20,
-    color: '#666',
+    color: colors.textSecondary,
     fontSize: 12,
     textAlign: 'center',
     paddingHorizontal: 20,

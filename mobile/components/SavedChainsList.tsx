@@ -1,5 +1,6 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, LayoutChangeEvent } from 'react-native';
+import { colors } from '../utils/theme';
 
 interface ChainSegment {
   id: string;
@@ -24,59 +25,103 @@ interface SavedChainsListProps {
   onRefresh: () => void;
 }
 
-// Colors for each track (matching AudioTimeline)
-const TRACK_COLORS = [
-  '#007AFF', // Blue
-  '#FF9500', // Orange
-  '#34C759', // Green
-  '#AF52DE', // Purple
-  '#5AC8FA', // Light Blue
-  '#FFCC00', // Yellow
-  '#FF2D55', // Pink
-];
-
-function TimelinePreview({ segments, totalDuration }: { segments: ChainSegment[]; totalDuration: number }) {
+function TimelinePreview({ 
+  segments, 
+  totalDuration,
+  containerWidth 
+}: { 
+  segments: ChainSegment[]; 
+  totalDuration: number;
+  containerWidth: number;
+}) {
   if (segments.length === 0 || totalDuration === 0) return null;
+
+  // Separate segments into top row (even indices) and bottom row (odd indices)
+  const topRowSegments: Array<{ segment: ChainSegment; index: number }> = [];
+  const bottomRowSegments: Array<{ segment: ChainSegment; index: number }> = [];
+  
+  segments.forEach((segment, index) => {
+    if (index % 2 === 0) {
+      topRowSegments.push({ segment, index });
+    } else {
+      bottomRowSegments.push({ segment, index });
+    }
+  });
+
+  // Helper to convert time to pixel width
+  const timeToWidth = (duration: number): number => {
+    const width = (duration / totalDuration) * containerWidth;
+    return Math.max(width, 30); // Minimum width
+  };
+
+  // Helper to convert time to pixel position
+  const timeToLeft = (startTime: number): number => {
+    return (startTime / totalDuration) * containerWidth;
+  };
 
   return (
     <View style={previewStyles.container}>
-      {segments.map((segment, index) => {
-        const widthPercent = (segment.duration / totalDuration) * 100;
-        const leftPercent = (segment.startTime / totalDuration) * 100;
-        const color = TRACK_COLORS[index % TRACK_COLORS.length];
-
-        return (
-          <View key={segment.id} style={previewStyles.trackRow}>
+      {/* Top row - even indices (0, 2, 4, ...) */}
+      <View style={previewStyles.trackRow}>
+        {topRowSegments.map(({ segment, index }) => {
+          const width = timeToWidth(segment.duration);
+          const left = timeToLeft(segment.startTime);
+          return (
             <View
+              key={segment.id}
               style={[
                 previewStyles.segmentBar,
                 {
-                  width: `${Math.max(widthPercent, 5)}%`,
-                  marginLeft: `${leftPercent}%`,
-                  backgroundColor: color,
+                  width,
+                  position: 'absolute',
+                  left,
                 },
               ]}
             />
-          </View>
-        );
-      })}
+          );
+        })}
+      </View>
+
+      {/* Bottom row - odd indices (1, 3, 5, ...) */}
+      <View style={previewStyles.trackRow}>
+        {bottomRowSegments.map(({ segment, index }) => {
+          const width = timeToWidth(segment.duration);
+          const left = timeToLeft(segment.startTime);
+          return (
+            <View
+              key={segment.id}
+              style={[
+                previewStyles.segmentBar,
+                {
+                  width,
+                  position: 'absolute',
+                  left,
+                },
+              ]}
+            />
+          );
+        })}
+      </View>
     </View>
   );
 }
 
 const previewStyles = StyleSheet.create({
   container: {
-    flex: 1,
-    gap: 3,
-    justifyContent: 'center',
+    width: '100%',
+    gap: 6,
+    position: 'relative',
   },
   trackRow: {
-    height: 8,
-    flexDirection: 'row',
+    height: 28,
+    position: 'relative',
   },
   segmentBar: {
-    height: '100%',
-    borderRadius: 2,
+    height: 28,
+    borderRadius: 4,
+    backgroundColor: 'rgba(88, 28, 135, 0.85)', // Dark purple matching detail page
+    borderWidth: 1,
+    borderColor: 'rgba(147, 51, 234, 0.3)',
   },
 });
 
@@ -87,19 +132,16 @@ export function SavedChainsList({
   onSelectChain,
   onRefresh
 }: SavedChainsListProps) {
-  const formatDuration = (seconds: number) => {
-    if (seconds < 60) {
-      return `${seconds}s`;
-    }
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    return secs > 0 ? `${mins}m ${secs}s` : `${mins}m`;
-  };
+  const [containerWidth, setContainerWidth] = React.useState(300);
+
+  const onContainerLayout = React.useCallback((event: LayoutChangeEvent) => {
+    setContainerWidth(event.nativeEvent.layout.width);
+  }, []);
 
   if (isLoading) {
     return (
       <View style={styles.loadingContainer}>
-        <ActivityIndicator size="small" color="#007AFF" />
+        <ActivityIndicator size="small" color={colors.primary} />
         <Text style={styles.loadingText}>Loading saved stories...</Text>
       </View>
     );
@@ -119,46 +161,37 @@ export function SavedChainsList({
     ? chains.filter(c => c.id === selectedChainId)
     : chains;
 
+  // Generate a name for each story (could be improved with actual names from backend)
+  const getStoryName = (chain: ChainSummary, index: number) => {
+    // For now, use a simple naming scheme
+    return `Story ${visibleChains.length - index}`;
+  };
+
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.scrollContent}>
-      {!selectedChainId && (
-        <View style={styles.header}>
-          <Text style={styles.title}>Saved Stories</Text>
-          <TouchableOpacity onPress={onRefresh} style={styles.refreshButton}>
-            <Text style={styles.refreshText}>Refresh</Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
+    <ScrollView 
+      style={styles.container} 
+      contentContainerStyle={styles.scrollContent}
+      onLayout={onContainerLayout}
+    >
       <View style={styles.listContainer}>
-        {visibleChains.map((chain) => {
-          const isSelected = chain.id === selectedChainId;
-
+        {visibleChains.map((chain, index) => {
           return (
             <TouchableOpacity
               key={chain.id}
-              style={[
-                styles.chainRow,
-                isSelected && styles.chainRowSelected,
-              ]}
+              style={styles.chainItem}
               onPress={() => onSelectChain(chain.id)}
               activeOpacity={0.7}
-              disabled={isSelected}
             >
-              <View style={styles.chainInfo}>
-                <Text style={styles.chainNumber}>
-                  #{chains.length - chains.findIndex(c => c.id === chain.id)}
-                </Text>
-                <Text style={styles.chainMeta}>
-                  {chain.chainLength} {chain.chainLength === 1 ? 'part' : 'parts'} · {formatDuration(chain.totalDuration)}
-                </Text>
-              </View>
-              <View style={styles.timelinePreviewContainer}>
+              <View style={styles.timelineContainer}>
                 <TimelinePreview
                   segments={chain.segments}
                   totalDuration={chain.totalDuration}
+                  containerWidth={containerWidth}
                 />
               </View>
+              <Text style={styles.storyName}>
+                {getStoryName(chain, index)}
+              </Text>
             </TouchableOpacity>
           );
         })}
@@ -174,57 +207,24 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingBottom: 20,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingHorizontal: 4,
-    marginBottom: 12,
-  },
-  title: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: '#333',
-  },
-  refreshButton: {
-    padding: 4,
-  },
-  refreshText: {
-    color: '#007AFF',
-    fontSize: 14,
-  },
   listContainer: {
-    gap: 8,
+    gap: 24,
+    paddingHorizontal: 0,
   },
-  chainRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: '#f8f8f8',
-    borderRadius: 12,
-    padding: 12,
-    gap: 12,
+  chainItem: {
+    width: '100%',
+    // No background, no border, no padding
   },
-  chainRowSelected: {
-    backgroundColor: '#fff',
-    borderWidth: 2,
-    borderColor: '#007AFF',
+  timelineContainer: {
+    width: '100%',
+    marginBottom: 8,
   },
-  chainInfo: {
-    width: 70,
-  },
-  chainNumber: {
+  storyName: {
     fontSize: 16,
-    fontWeight: 'bold',
-    color: '#007AFF',
-  },
-  chainMeta: {
-    fontSize: 10,
-    color: '#666',
-    marginTop: 2,
-  },
-  timelinePreviewContainer: {
-    flex: 1,
-    height: 50,
+    fontWeight: '500',
+    color: colors.textPrimary,
+    textAlign: 'left',
+    paddingHorizontal: 0,
   },
   loadingContainer: {
     flexDirection: 'row',
@@ -234,7 +234,7 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   loadingText: {
-    color: '#666',
+    color: colors.textSecondary,
     fontSize: 14,
   },
   emptyContainer: {
@@ -242,11 +242,11 @@ const styles = StyleSheet.create({
     padding: 20,
   },
   emptyText: {
-    color: '#666',
+    color: colors.textSecondary,
     fontSize: 14,
   },
   emptySubtext: {
-    color: '#999',
+    color: colors.textTertiary,
     fontSize: 12,
     marginTop: 4,
   },
