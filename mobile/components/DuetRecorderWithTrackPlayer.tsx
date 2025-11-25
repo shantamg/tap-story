@@ -47,12 +47,20 @@ export function DuetRecorderWithTrackPlayer() {
   const [latencyOffsetMs, setLatencyOffsetMs] = useState(0);
   const [isCalibratingLatency, setIsCalibratingLatency] = useState(false);
 
+  // Download state
+  const [downloadingSegmentIds, setDownloadingSegmentIds] = useState<Set<string>>(new Set());
+  const [isDownloadingAudio, setIsDownloadingAudio] = useState(false);
+
   // Saved chains state
   const [savedChains, setSavedChains] = useState<ChainSummary[]>([]);
   const [isLoadingChains, setIsLoadingChains] = useState(false);
 
   // View state
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
+
+  // Derived state for control disabling
+  const hasDownloadingSegments = downloadingSegmentIds.size > 0;
+  const canPlayOrRecord = !isDownloadingAudio && !hasDownloadingSegments && !isLoading;
 
   // Lazy initialization to prevent creating new instances on every render
   const recorderRef = useRef<AudioRecorder | null>(null);
