@@ -762,6 +762,7 @@ export function DuetRecorderWithTrackPlayer() {
           onSeek={handleSeek}
           onSeekPreview={handleSeekPreview}
           processingSegmentIds={processingSegmentIds}
+          downloadingSegmentIds={downloadingSegmentIds}
         />
       </View>
 
