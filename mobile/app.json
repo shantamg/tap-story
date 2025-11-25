@@ -20,7 +20,8 @@
       "bundleIdentifier": "com.tapstory.app",
       "infoPlist": {
         "NSMicrophoneUsageDescription": "This app needs access to your microphone to record audio stories.",
-        "ITSAppUsesNonExemptEncryption": false
+        "ITSAppUsesNonExemptEncryption": false,
+        "UIBackgroundModes": ["audio"]
       }
     },
     "android": {
@@ -48,7 +49,8 @@
           "backgroundColor": "#000000",
           "image": "./assets/splash.png"
         }
-      ]
+      ],
+      "./plugins/withTrackPlayer.js"
     ],
     "scheme": "tapstory",
     "extra": {
