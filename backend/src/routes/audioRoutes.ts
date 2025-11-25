@@ -8,13 +8,13 @@ const prisma = new PrismaClient();
 // Get presigned URL for upload
 router.post('/upload-url', async (req: Request, res: Response) => {
   try {
-    const { filename } = req.body;
+    const { filename, contentType } = req.body;
 
     if (!filename) {
       return res.status(400).json({ error: 'Filename required' });
     }
 
-    const result = await generateUploadUrl(filename);
+    const result = await generateUploadUrl(filename, contentType);
     res.json(result);
   } catch (error) {
     console.error('Upload URL generation error:', error);

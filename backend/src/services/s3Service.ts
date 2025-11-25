@@ -12,13 +12,16 @@ const s3Client = new S3Client({
 
 const BUCKET_NAME = process.env.AWS_S3_BUCKET || 'tapstory-audio-dev';
 
-export async function generateUploadUrl(filename: string): Promise<{ uploadUrl: string; key: string }> {
+export async function generateUploadUrl(
+  filename: string,
+  contentType = 'audio/webm'
+): Promise<{ uploadUrl: string; key: string }> {
   const key = `audio/${uuidv4()}-${filename}`;
 
   const command = new PutObjectCommand({
     Bucket: BUCKET_NAME,
     Key: key,
-    ContentType: 'audio/webm',
+    ContentType: contentType,
   });
 
   const uploadUrl = await getSignedUrl(s3Client, command, { expiresIn: 3600 });

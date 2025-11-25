@@ -7,7 +7,7 @@ import audioRoutes from './routes/audioRoutes';
 dotenv.config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = parseInt(process.env.PORT || '3000', 10);
 
 // Middleware
 app.use(cors());
@@ -22,8 +22,8 @@ app.get('/health', (req, res) => {
 // Routes
 app.use('/api/audio', audioRoutes);
 
-// Start server
-app.listen(PORT, () => {
+// Start server - listen on all interfaces for mobile device access
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
 });
 

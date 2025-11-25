@@ -3,12 +3,13 @@ import { View, Text, StyleSheet, Button, Alert } from 'react-native';
 import { AudioRecorder } from '../services/audioService';
 import { DuetPlayer } from '../services/duetPlayer';
 import { RecordButton } from './RecordButton';
-
-const API_URL = process.env.EXPO_PUBLIC_API_URL || 'http://localhost:3000';
+import { getApiUrl } from '../utils/api';
+import { saveRecordingLocally, getLocalAudioPath } from '../services/audioStorage';
 
 interface AudioChainNode {
   id: string;
-  audioUrl: string;
+  audioUrl: string;       // Remote S3 presigned URL
+  localUri?: string;      // Local file URI (if available)
   duration: number;
   parentId: string | null;
 }
@@ -70,8 +71,8 @@ export function DuetRecorder() {
     try {
       setIsLoading(true);
 
-      // Stop recording
-      const uri = await recorder.current.stopRecording();
+      // Stop recording - get temp URI
+      const tempUri = await recorder.current.stopRecording();
       setIsRecording(false);
 
       // Stop playback if playing
@@ -84,10 +85,10 @@ export function DuetRecorder() {
       const duration = Math.ceil((Date.now() - recordingStartTimestamp.current) / 1000);
 
       // Upload to S3
-      const key = await recorder.current.uploadRecording(uri, API_URL);
+      const key = await recorder.current.uploadRecording(tempUri);
 
       // Save to database
-      const saveResponse = await fetch(`${API_URL}/api/audio/save`, {
+      const saveResponse = await fetch(`${getApiUrl()}/api/audio/save`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -103,8 +104,16 @@ export function DuetRecorder() {
 
       const savedNode = await saveResponse.json();
 
-      // Update chain and current node
-      setAudioChain([...audioChain, savedNode]);
+      // Save recording to permanent local storage using the node ID
+      const localUri = await saveRecordingLocally(tempUri, savedNode.id);
+
+      // Update chain with both remote URL and local URI
+      const nodeWithLocalUri: AudioChainNode = {
+        ...savedNode,
+        localUri,
+      };
+
+      setAudioChain([...audioChain, nodeWithLocalUri]);
       setCurrentNodeId(savedNode.id);
 
       Alert.alert('Success', `Recording saved! Duration: ${duration}s`);

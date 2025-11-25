@@ -1,8 +1,10 @@
 import { Audio, AVPlaybackStatus } from 'expo-av';
+import { localAudioExists, getLocalAudioPath, downloadAndCacheAudio } from './audioStorage';
 
 interface AudioSegment {
   id: string;
-  audioUrl: string;
+  audioUrl: string;       // Remote S3 presigned URL
+  localUri?: string;      // Local file URI (if available)
   duration: number;
   startTime?: number;
   sound?: Audio.Sound;
@@ -14,14 +16,16 @@ export class DuetPlayer {
   private playbackStartTime = 0;
   private isPlaying = false;
 
-  async loadChain(chain: Array<{ id: string; audioUrl: string; duration: number }>): Promise<void> {
+  async loadChain(chain: Array<{ id: string; audioUrl: string; localUri?: string; duration: number }>): Promise<void> {
     // Clean up existing sounds
     await this.cleanup();
 
     let cumulativeTime = 0;
     this.segments = chain.map(node => {
-      const segment = {
-        ...node,
+      const segment: AudioSegment = {
+        id: node.id,
+        audioUrl: node.audioUrl,
+        localUri: node.localUri,
         startTime: cumulativeTime,
         duration: node.duration,
       };
@@ -54,15 +58,43 @@ export class DuetPlayer {
     await this.playSegmentChain(segmentIndex, segmentStartPosition);
   }
 
+  /**
+   * Get the best URI to use for playback - local if available, otherwise remote
+   */
+  private async getPlaybackUri(segment: AudioSegment): Promise<string> {
+    // If we have a local URI passed in, use it
+    if (segment.localUri) {
+      return segment.localUri;
+    }
+
+    // Check if we have it cached locally
+    const hasLocal = await localAudioExists(segment.id);
+    if (hasLocal) {
+      return getLocalAudioPath(segment.id);
+    }
+
+    // Fall back to remote URL (and cache it for next time)
+    try {
+      const localPath = await downloadAndCacheAudio(segment.audioUrl, segment.id);
+      return localPath;
+    } catch (error) {
+      console.warn('Failed to cache audio, using remote URL:', error);
+      return segment.audioUrl;
+    }
+  }
+
   private async playSegmentChain(startIndex: number, startPosition: number): Promise<void> {
     this.isPlaying = true;
 
     for (let i = startIndex; i < this.segments.length && this.isPlaying; i++) {
       const segment = this.segments[i];
 
+      // Get the best URI (local preferred, remote fallback)
+      const uri = await this.getPlaybackUri(segment);
+
       // Load the audio
       const { sound } = await Audio.Sound.createAsync(
-        { uri: segment.audioUrl },
+        { uri },
         {
           shouldPlay: true,
           positionMillis: i === startIndex ? startPosition * 1000 : 0,

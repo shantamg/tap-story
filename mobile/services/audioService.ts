@@ -1,5 +1,6 @@
 import { Audio } from 'expo-av';
-import * as FileSystem from 'expo-file-system';
+import { Platform } from 'react-native';
+import { getApiUrl } from '../utils/api';
 
 export class AudioRecorder {
   private recording: Audio.Recording | null = null;
@@ -91,26 +92,32 @@ export class AudioRecorder {
     }
   }
 
-  async uploadRecording(uri: string, apiUrl: string): Promise<string> {
+  async uploadRecording(uri: string): Promise<string> {
     try {
+      const apiUrl = getApiUrl();
+
+      // Determine file extension and content type based on platform
+      const isIOS = Platform.OS === 'ios';
+      const filename = isIOS ? 'recording.m4a' : 'recording.webm';
+      const contentType = isIOS ? 'audio/mp4' : 'audio/webm';
+
       // Get presigned URL
       const uploadUrlResponse = await fetch(`${apiUrl}/api/audio/upload-url`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: 'recording.webm' }),
+        body: JSON.stringify({ filename, contentType }),
       });
 
       const { uploadUrl, key } = await uploadUrlResponse.json();
 
       // Upload file to S3
-      const fileInfo = await FileSystem.getInfoAsync(uri);
       const fileBlob = await fetch(uri).then(r => r.blob());
 
       const uploadResponse = await fetch(uploadUrl, {
         method: 'PUT',
         body: fileBlob,
         headers: {
-          'Content-Type': 'audio/webm',
+          'Content-Type': contentType,
         },
       });
 
