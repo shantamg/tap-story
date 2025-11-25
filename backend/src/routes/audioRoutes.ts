@@ -222,7 +222,7 @@ router.delete('/chain/:id', async (req: Request, res: Response) => {
     let currentId: string | null = id;
 
     while (currentId) {
-      const node = await prisma.audioNode.findUnique({
+      const node: { id: string; audioUrl: string; parentId: string | null } | null = await prisma.audioNode.findUnique({
         where: { id: currentId },
         select: { id: true, audioUrl: true, parentId: true },
       });
