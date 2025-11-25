@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, TouchableOpacity, StyleSheet, Text, ActivityIndicator } from 'react-native';
 import { colors } from '../utils/theme';
 
 interface CassettePlayerControlsProps {
@@ -8,6 +8,8 @@ interface CassettePlayerControlsProps {
   isWaitingToRecord: boolean;
   isLoading: boolean;
   hasAudio: boolean;
+  isDownloadingAudio?: boolean;
+  downloadingSegmentCount?: number;
   onPlay: () => void;
   onStop: () => void;
   onRecord: () => void;
@@ -21,78 +23,110 @@ export function CassettePlayerControls({
   isWaitingToRecord,
   isLoading,
   hasAudio,
+  isDownloadingAudio = false,
+  downloadingSegmentCount = 0,
   onPlay,
   onStop,
   onRecord,
   onRewind,
   onFastForward,
 }: CassettePlayerControlsProps) {
+  const playDisabled = isLoading || isDownloadingAudio || !hasAudio || isRecording;
+  const recordDisabled = isLoading || isDownloadingAudio;
+  const rewindDisabled = isLoading || isDownloadingAudio || isRecording;
   return (
     <View style={styles.container}>
-      {/* Rewind button */}
-      <TouchableOpacity
-        style={[styles.button, styles.secondaryButton]}
-        onPress={onRewind}
-        disabled={isLoading || isRecording}
-      >
-        <DoubleTriangle direction="left" />
-      </TouchableOpacity>
-
-      {/* Stop button (Square) - show when playing or recording */}
-      {(isPlaying || isRecording) && (
+      <View style={styles.buttonRow}>
+        {/* Rewind button */}
         <TouchableOpacity
-          style={[styles.button, styles.stopButton]}
-          onPress={onStop}
-          disabled={isLoading}
+          style={[styles.button, styles.secondaryButton]}
+          onPress={onRewind}
+          disabled={rewindDisabled}
         >
-          <View style={styles.square} />
+          <DoubleTriangle direction="left" />
         </TouchableOpacity>
-      )}
 
-      {/* Play button (Triangle) - only show when not playing */}
-      {!isPlaying && (
+        {/* Stop button (Square) - show when playing or recording */}
+        {(isPlaying || isRecording) && (
+          <TouchableOpacity
+            style={[styles.button, styles.stopButton]}
+            onPress={onStop}
+            disabled={isLoading}
+          >
+            <View style={styles.square} />
+          </TouchableOpacity>
+        )}
+
+        {/* Play button (Triangle) - only show when not playing */}
+        {!isPlaying && (
+          <TouchableOpacity
+            style={[styles.button, styles.playButton]}
+            onPress={onPlay}
+            disabled={playDisabled}
+          >
+            <View style={styles.triangle} />
+          </TouchableOpacity>
+        )}
+
+        {/* Record button (Circle) */}
         <TouchableOpacity
-          style={[styles.button, styles.playButton]}
-          onPress={onPlay}
-          disabled={isLoading || !hasAudio || isRecording}
+          style={[
+            styles.button,
+            styles.recordButton,
+            isRecording && styles.recordButtonActive,
+            isWaitingToRecord && styles.recordButtonWaiting,
+          ]}
+          onPress={onRecord}
+          disabled={recordDisabled}
         >
-          <View style={styles.triangle} />
+          <View style={styles.circle} />
         </TouchableOpacity>
+
+        {/* Fast Forward button */}
+        <TouchableOpacity
+          style={[styles.button, styles.secondaryButton]}
+          onPress={onFastForward}
+          disabled={rewindDisabled}
+        >
+          <DoubleTriangle direction="right" />
+        </TouchableOpacity>
+      </View>
+
+      {/* Downloading message */}
+      {isDownloadingAudio && downloadingSegmentCount > 0 && (
+        <View style={styles.downloadingMessage}>
+          <ActivityIndicator size="small" color="#666" />
+          <Text style={styles.downloadingText}>
+            Downloading {downloadingSegmentCount} segment{downloadingSegmentCount !== 1 ? 's' : ''}...
+          </Text>
+        </View>
       )}
-
-      {/* Record button (Circle) */}
-      <TouchableOpacity
-        style={[
-          styles.button,
-          styles.recordButton,
-          isRecording && styles.recordButtonActive,
-          isWaitingToRecord && styles.recordButtonWaiting,
-        ]}
-        onPress={onRecord}
-        disabled={isLoading}
-      >
-        <View style={styles.circle} />
-      </TouchableOpacity>
-
-      {/* Fast Forward button */}
-      <TouchableOpacity
-        style={[styles.button, styles.secondaryButton]}
-        onPress={onFastForward}
-        disabled={isLoading || isRecording}
-      >
-        <DoubleTriangle direction="right" />
-      </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
+    alignItems: 'center',
+    paddingVertical: 20,
+  },
+  buttonRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     gap: 20,
-    paddingVertical: 20,
+  },
+  downloadingMessage: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginTop: 12,
+    gap: 8,
+  },
+  downloadingText: {
+    fontSize: 12,
+    color: '#666',
+    fontFamily: 'Courier New',
   },
   button: {
     width: 70,

@@ -786,6 +786,8 @@ export function DuetRecorderWithTrackPlayer() {
         isWaitingToRecord={isWaitingToRecord}
         isLoading={isLoading}
         hasAudio={audioChain.length > 0}
+        isDownloadingAudio={isDownloadingAudio}
+        downloadingSegmentCount={downloadingSegmentIds.size}
         onPlay={playFromPlayhead}
         onStop={handleStopButton}
         onRecord={handleRecordPress}
