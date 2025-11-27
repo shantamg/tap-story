@@ -1,6 +1,7 @@
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
 import { Platform } from 'react-native';
 import { getApiUrl } from '../utils/api';
+import { isNativeModuleAvailable, TapStoryAudioEngine, type RecordingResult as NativeRecordingResult } from './audio/TapStoryAudio';
 
 // Recording preset configuration
 const RECORDING_OPTIONS = {
@@ -32,6 +33,15 @@ export class AudioRecorder {
   private sound: Audio.Sound | null = null;
   private ready = false;
   private lastStartLatency = 0;  // Track measured latency
+
+  /**
+   * Check if native synchronized recording is available
+   * When true, recording should be done through DuetTrackPlayer.playFrom() 
+   * with a callback, which handles recording internally via the native module.
+   */
+  static isNativeSyncAvailable(): boolean {
+    return isNativeModuleAvailable();
+  }
 
   async init(): Promise<void> {
     try {
@@ -182,10 +192,25 @@ export class AudioRecorder {
     try {
       const apiUrl = getApiUrl();
 
-      // Determine file extension and content type based on platform
-      const isIOS = Platform.OS === 'ios';
-      const filename = isIOS ? 'recording.m4a' : 'recording.webm';
-      const contentType = isIOS ? 'audio/mp4' : 'audio/webm';
+      // Determine file extension and content type based on file extension or platform
+      // Native audio module produces WAV files, expo-av produces m4a/webm
+      let filename: string;
+      let contentType: string;
+      
+      if (uri.endsWith('.wav')) {
+        // Native recording (WAV format)
+        filename = 'recording.wav';
+        contentType = 'audio/wav';
+        console.log('[AudioRecorder] Uploading native WAV recording');
+      } else if (Platform.OS === 'ios') {
+        // iOS expo-av recording
+        filename = 'recording.m4a';
+        contentType = 'audio/mp4';
+      } else {
+        // Android expo-av recording
+        filename = 'recording.webm';
+        contentType = 'audio/webm';
+      }
 
       // Get presigned URL
       const uploadUrlResponse = await fetch(`${apiUrl}/api/audio/upload-url`, {

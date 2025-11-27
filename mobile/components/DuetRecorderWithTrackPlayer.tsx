@@ -1,10 +1,13 @@
 /**
  * DuetRecorderWithTrackPlayer - Audio duet recording component
+ * 
+ * Uses native audio module (TapStoryAudioModule) for synchronized playback and recording
+ * when available, falling back to expo-av otherwise.
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, Button, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, Button, TouchableOpacity, Platform } from 'react-native';
 import { AudioRecorder } from '../services/audioService';
-import { DuetTrackPlayer, DuetSegment } from '../services/audio';
+import { DuetTrackPlayer, DuetSegment, NativeDuetPlayer, getTapStoryAudio } from '../services/audio';
 import { CassettePlayerControls } from './CassettePlayerControls';
 import { AudioTimeline } from './AudioTimeline';
 import { SavedChainsList } from './SavedChainsList';
@@ -12,6 +15,9 @@ import { getApiUrl } from '../utils/api';
 import { saveRecordingLocally, saveLatencyOffset, getLatencyOffset, localAudioExists, downloadAndCacheAudio } from '../services/audioStorage';
 import { colors } from '../utils/theme';
 import { LatencyNudge } from './LatencyNudge';
+
+// Type for player that works with both DuetTrackPlayer and NativeDuetPlayer
+type DuetPlayerType = DuetTrackPlayer | NativeDuetPlayer;
 
 interface AudioChainNode extends DuetSegment {
   parentId: string | null;
@@ -62,20 +68,35 @@ export function DuetRecorderWithTrackPlayer() {
   const hasDownloadingSegments = downloadingSegmentIds.size > 0;
   const canPlayOrRecord = !isDownloadingAudio && !hasDownloadingSegments && !isLoading;
 
+  // Track if using native audio (for UI feedback)
+  const [usingNativeAudio, setUsingNativeAudio] = useState(false);
+
   // Lazy initialization to prevent creating new instances on every render
+  // Use NativeDuetPlayer when available for better sync
   const recorderRef = useRef<AudioRecorder | null>(null);
-  const playerRef = useRef<DuetTrackPlayer | null>(null);
+  const playerRef = useRef<DuetPlayerType | null>(null);
+  const isUsingNativeRef = useRef(false);
   
   if (!recorderRef.current) {
     recorderRef.current = new AudioRecorder();
   }
   if (!playerRef.current) {
-    playerRef.current = new DuetTrackPlayer();
+    // Check if native audio is available
+    const nativeAudio = getTapStoryAudio();
+    if (nativeAudio.isAvailable()) {
+      console.log('[DuetRecorderWithTrackPlayer] Using NativeDuetPlayer for better sync');
+      playerRef.current = new NativeDuetPlayer();
+      isUsingNativeRef.current = true;
+    } else {
+      console.log('[DuetRecorderWithTrackPlayer] Native audio not available, using DuetTrackPlayer');
+      playerRef.current = new DuetTrackPlayer();
+      isUsingNativeRef.current = false;
+    }
   }
   
   // Non-null references (guaranteed by lazy init above)
   const recorder = recorderRef as React.MutableRefObject<AudioRecorder>;
-  const player = playerRef as React.MutableRefObject<DuetTrackPlayer>;
+  const player = playerRef as React.MutableRefObject<DuetPlayerType>;
   
   const recordingStartTimestamp = useRef(0);
   const positionInterval = useRef<NodeJS.Timeout | null>(null);
@@ -100,9 +121,17 @@ export function DuetRecorderWithTrackPlayer() {
 
   async function initAudio() {
     try {
-      await recorder.current.init();
-      // Initialize the track player
+      // Initialize recorder (only needed if not using native audio for recording)
+      if (!isUsingNativeRef.current) {
+        await recorder.current.init();
+      }
+      // Initialize the player (either native or expo-av based)
       await player.current.initialize();
+      setUsingNativeAudio(isUsingNativeRef.current);
+      
+      if (isUsingNativeRef.current) {
+        console.log('[DuetRecorderWithTrackPlayer] Native audio initialized - perfect sync enabled');
+      }
     } catch (error) {
       console.error('[DuetRecorderWithTrackPlayer] Failed to initialize audio:', error);
     }
@@ -327,7 +356,10 @@ export function DuetRecorderWithTrackPlayer() {
       if (audioChain.length > 0) {
         await player.current.loadChain(audioChain);
 
-        await recorder.current.prepareRecording();
+        // Only prepare recorder if not using native audio (native handles recording internally)
+        if (!isUsingNativeRef.current) {
+          await recorder.current.prepareRecording();
+        }
 
         // Get current playhead position
         const currentPlayheadPosition = isPlaying 
@@ -400,6 +432,13 @@ export function DuetRecorderWithTrackPlayer() {
       } else {
         // First recording - start at 0
         setRecordingStartTime(0);
+        
+        if (isUsingNativeRef.current) {
+          // Use native recording for first recording
+          const nativePlayer = player.current as NativeDuetPlayer;
+          await nativePlayer.startRecordingOnly();
+        }
+        
         await actuallyStartRecording();
       }
     } catch (error) {
@@ -411,18 +450,34 @@ export function DuetRecorderWithTrackPlayer() {
 
   async function actuallyStartRecording() {
     try {
-      const actualStartTimestamp = await recorder.current.startRecording();
-      recordingStartTimestamp.current = actualStartTimestamp;
+      // When using native audio, recording is already started by playAndRecord
+      // We just need to update state and start duration tracking
+      if (isUsingNativeRef.current) {
+        console.log('[DuetRecorder] Native recording started at:', recordingStartTime);
+        recordingStartTimestamp.current = Date.now();
+        
+        setIsRecording(true);
+        setRecordingDuration(0);
 
-      console.log('[DuetRecorder] Recording started at:', recordingStartTime);
+        recordingDurationInterval.current = setInterval(() => {
+          const elapsed = (Date.now() - recordingStartTimestamp.current) / 1000;
+          setRecordingDuration(elapsed);
+        }, 100);
+      } else {
+        // Non-native: use AudioRecorder
+        const actualStartTimestamp = await recorder.current.startRecording();
+        recordingStartTimestamp.current = actualStartTimestamp;
 
-      setIsRecording(true);
-      setRecordingDuration(0);
+        console.log('[DuetRecorder] Recording started at:', recordingStartTime);
 
-      recordingDurationInterval.current = setInterval(() => {
-        const elapsed = (Date.now() - recordingStartTimestamp.current) / 1000;
-        setRecordingDuration(elapsed);
-      }, 100);
+        setIsRecording(true);
+        setRecordingDuration(0);
+
+        recordingDurationInterval.current = setInterval(() => {
+          const elapsed = (Date.now() - recordingStartTimestamp.current) / 1000;
+          setRecordingDuration(elapsed);
+        }, 100);
+      }
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
     } finally {
@@ -439,18 +494,43 @@ export function DuetRecorderWithTrackPlayer() {
         recordingDurationInterval.current = null;
       }
 
-      const tempUri = await recorder.current.stopRecording();
+      let tempUri: string;
+      let duration: number;
+      let startTime: number;
+
+      if (isUsingNativeRef.current) {
+        // Native audio: stop player which also stops recording
+        const nativePlayer = player.current as NativeDuetPlayer;
+        const result = await nativePlayer.stop();
+        
+        if (!result) {
+          throw new Error('No recording result from native player');
+        }
+        
+        tempUri = result.uri;
+        duration = Math.ceil(result.durationMs / 1000);
+        startTime = result.startTimeMs / 1000;
+        
+        console.log('[DuetRecorder] Native recording stopped:', {
+          uri: tempUri,
+          duration,
+          startTime: result.startTimeMs
+        });
+      } else {
+        // Non-native: use AudioRecorder
+        tempUri = await recorder.current.stopRecording();
+        duration = Math.ceil((Date.now() - recordingStartTimestamp.current) / 1000);
+        startTime = recordingStartTime;
+        
+        if (isPlaying) {
+          await player.current.stop();
+        }
+      }
+
       setIsRecording(false);
       setRecordingDuration(0);
-
-      if (isPlaying) {
-        await player.current.stop();
-        setIsPlaying(false);
-      }
+      setIsPlaying(false);
       stopPositionTracking();
-
-      const duration = Math.ceil((Date.now() - recordingStartTimestamp.current) / 1000);
-      const startTime = recordingStartTime;
 
       console.log('[DuetRecorder] Saving segment - startTime:', startTime, 'duration:', duration);
 
@@ -771,6 +851,9 @@ export function DuetRecorderWithTrackPlayer() {
         <Text style={styles.chainInfo}>
           {audioChain.length} {audioChain.length === 1 ? 'segment' : 'segments'}
         </Text>
+        {usingNativeAudio && (
+          <Text style={styles.syncStatus}>⚡ Native Sync Enabled</Text>
+        )}
         {isRecording && isPlaying && (
           <Text style={styles.recordingText}>Recording while playing...</Text>
         )}
@@ -795,13 +878,17 @@ export function DuetRecorderWithTrackPlayer() {
         onFastForward={handleFastForward}
       />
 
-      <LatencyNudge
-        offsetMs={latencyOffsetMs}
-        onOffsetChange={handleLatencyChange}
-        disabled={isRecording || isPlaying || isCalibratingLatency}
-      />
+      {/* Only show latency controls when not using native audio (native doesn't need manual calibration) */}
+      {!usingNativeAudio && (
+        <LatencyNudge
+          offsetMs={latencyOffsetMs}
+          onOffsetChange={handleLatencyChange}
+          disabled={isRecording || isPlaying || isCalibratingLatency}
+        />
+      )}
 
-      {audioChain.length >= 2 && (
+      {/* Only show calibration when not using native audio */}
+      {!usingNativeAudio && audioChain.length >= 2 && (
         <View style={styles.calibrationContainer}>
           <Button
             title={isCalibratingLatency ? 'Calibrating…' : 'Calibrate sync from last 2 tracks'}
@@ -874,6 +961,12 @@ const styles = StyleSheet.create({
   chainInfo: {
     fontSize: 16,
     color: colors.textPrimary,
+  },
+  syncStatus: {
+    fontSize: 12,
+    color: '#4CAF50',
+    marginTop: 4,
+    fontWeight: '500',
   },
   recordingText: {
     color: colors.recording,
