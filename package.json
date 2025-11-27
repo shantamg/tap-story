@@ -8,6 +8,7 @@
     "shared"
   ],
   "scripts": {
+    "kill": "lsof -ti:3000,8081 | xargs kill -9 2>/dev/null; echo 'Ports 3000 and 8081 cleared'",
     "dev:api": "npm run dev --workspace=backend",
     "dev:mobile": "npm run start --workspace=mobile",
     "dev:mobile:clear": "npm run start:clear --workspace=mobile",
@@ -26,7 +27,10 @@
     "deploy:mobile:android": "cd mobile && eas build --platform android",
     "clean": "npm run clean --workspaces --if-present",
     "reset": "./scripts/reset-all.sh",
-    "postinstall": "patch-package || true"
+    "postinstall": "patch-package || true",
+    "android": "cd mobile && npx expo run:android",
+    "ios": "cd mobile && npx expo run:ios",
+    "start": "cd mobile && npx expo start --dev-client"
   },
   "devDependencies": {
     "typescript": "^5.3.3"

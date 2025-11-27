@@ -36,6 +36,94 @@ The development environment uses [**devenv**](https://devenv.sh/) and [**direnv*
 
 ---
 
+## Mobile Development (Android)
+
+### Prerequisites
+
+- Android Studio with SDK and emulator installed
+- An Android emulator created (e.g., `Medium_Phone_API_36.0`)
+- For physical device: USB debugging enabled
+
+### Starting the Development Environment
+
+You need **two terminals** running:
+
+**Terminal 1 - Backend API:**
+```bash
+cd /Users/shantam/Software/tap-story
+npm run dev:api
+```
+
+**Terminal 2 - Metro Bundler:**
+```bash
+cd /Users/shantam/Software/tap-story/mobile
+npx expo start --dev-client
+```
+
+### Stopping Servers
+
+To kill all running servers:
+```bash
+# Kill Metro (port 8081) and Backend (port 3000)
+lsof -ti:8081 | xargs kill -9 2>/dev/null
+lsof -ti:3000 | xargs kill -9 2>/dev/null
+```
+
+Or press `Ctrl+C` in each terminal.
+
+### Running on Android Emulator
+
+1. **Start the emulator:**
+   ```bash
+   emulator -avd Medium_Phone_API_36.0
+   ```
+
+2. **Launch the app** (after emulator boots):
+   ```bash
+   adb shell am start -n com.tapstory.app/.MainActivity
+   ```
+   
+   Or press `a` in the Metro terminal.
+
+3. **Reload the app:** Press `r` in the Metro terminal.
+
+### Running on Physical Android Device
+
+1. **Connect your phone via USB** with USB debugging enabled.
+
+2. **Verify device is connected:**
+   ```bash
+   adb devices
+   # Should show your device serial number
+   ```
+
+3. **Install the dev build:**
+   ```bash
+   cd mobile
+   npx expo run:android --device
+   ```
+   This builds and installs the native app on your phone.
+
+4. **Start Metro** (if not already running):
+   ```bash
+   npx expo start --dev-client
+   ```
+
+5. The app should auto-connect to Metro. If not, shake your phone to open the dev menu and enter your computer's IP address (shown in Metro terminal).
+
+### Rebuilding Native Code
+
+If you modify native code (Kotlin/Java files in `android/`), you must rebuild:
+
+```bash
+cd mobile
+npx expo run:android
+```
+
+JavaScript changes hot-reload automatically - no rebuild needed.
+
+---
+
 ## Database Connection
 
 Postgres is managed automatically by devenv. You can connect to the database using any client:

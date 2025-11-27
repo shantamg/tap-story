@@ -6,20 +6,21 @@ module.exports = ({ config }) => {
     process.env.EXPO_PUBLIC_API_URL || "https://tap-story-api.onrender.com";
 
   const isDev = process.env.APP_VARIANT === "development";
+  const androidPackage = isDev ? "com.tapstory.app.dev" : "com.tapstory.app";
+  const iosBundleId = isDev ? "com.tapstory.app.dev" : "com.tapstory.app";
 
   return {
     ...baseConfig.expo,
-    ...config,
     name: isDev ? "Tap Story (Dev)" : baseConfig.expo.name,
     android: {
       ...baseConfig.expo.android,
-      package: isDev ? "com.tapstory.app.dev" : baseConfig.expo.android.package,
+      ...config?.android,
+      package: androidPackage,
     },
     ios: {
       ...baseConfig.expo.ios,
-      bundleIdentifier: isDev
-        ? "com.tapstory.app.dev"
-        : baseConfig.expo.ios.bundleIdentifier,
+      ...config?.ios,
+      bundleIdentifier: iosBundleId,
     },
     extra: {
       ...baseConfig.expo.extra,
