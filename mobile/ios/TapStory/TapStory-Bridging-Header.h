@@ -4,3 +4,6 @@
 
 #import <React/RCTBridgeModule.h>
 #import <React/RCTEventEmitter.h>
+
+// Low-latency audio engine using RemoteIO AudioUnit
+#import "AudioEngineIOS.h"

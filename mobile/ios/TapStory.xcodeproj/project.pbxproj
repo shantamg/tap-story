@@ -20,7 +20,7 @@
 		13B07F961A680F5B00A75B9A /* TapStory.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = TapStory.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		13B07FB51A68108700A75B9A /* Images.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; name = Images.xcassets; path = TapStory/Images.xcassets; sourceTree = "<group>"; };
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = TapStory/Info.plist; sourceTree = "<group>"; };
-		25537C8BD982C16AA73AF76A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; name = PrivacyInfo.xcprivacy; path = TapStory/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		25537C8BD982C16AA73AF76A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = TapStory/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		3E7B436D0B101927FEB2013B /* Pods-TapStory.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TapStory.release.xcconfig"; path = "Target Support Files/Pods-TapStory/Pods-TapStory.release.xcconfig"; sourceTree = "<group>"; };
 		67B432B5F5200C008B1D98A1 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-TapStory/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		7ADD44486DB51E56B06EFD47 /* libPods-TapStory.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-TapStory.a"; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -111,7 +111,6 @@
 				C327E48321D122ABC98E6EDF /* Pods-TapStory.debug.xcconfig */,
 				3E7B436D0B101927FEB2013B /* Pods-TapStory.release.xcconfig */,
 			);
-			name = Pods;
 			path = Pods;
 			sourceTree = "<group>";
 		};
@@ -345,6 +344,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = TapStory/TapStory.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2932TX5LVZ;
 				ENABLE_BITCODE = NO;
 				GCC_PREPROCESSOR_DEFINITIONS = (
 					"$(inherited)",
@@ -381,6 +381,7 @@
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = TapStory/TapStory.entitlements;
 				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 2932TX5LVZ;
 				INFOPLIST_FILE = TapStory/Info.plist;
 				IPHONEOS_DEPLOYMENT_TARGET = 15.1;
 				LD_RUNPATH_SEARCH_PATHS = (
