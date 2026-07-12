@@ -1,11 +1,13 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, LayoutChangeEvent, Modal, Alert } from 'react-native';
-import { colors } from '../utils/theme';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, LayoutChangeEvent, Modal, Alert, RefreshControl } from 'react-native';
+import { colors, spacing, radius, typography } from '../utils/theme';
+import { AppButton } from './AppButton';
 import type { AudioChainSegment, AudioChainSummary } from '@shared/types/audio';
 
 interface SavedChainsListProps {
   chains: AudioChainSummary[];
   isLoading: boolean;
+  error?: string | null;
   selectedChainId: string | null;
   onSelectChain: (chainId: string) => void;
   onRefresh: () => void;
@@ -100,21 +102,22 @@ const previewStyles = StyleSheet.create({
     position: 'relative',
   },
   trackRow: {
-    height: 28,
+    height: 24,
     position: 'relative',
   },
   segmentBar: {
-    height: 28,
+    height: 24,
     borderRadius: 4,
-    backgroundColor: 'rgba(88, 28, 135, 0.85)', // Dark purple matching detail page
+    backgroundColor: 'rgba(139, 92, 246, 0.85)', // Violet, matching the timeline
     borderWidth: 1,
-    borderColor: 'rgba(147, 51, 234, 0.3)',
+    borderColor: 'rgba(167, 139, 250, 0.35)',
   },
 });
 
 export function SavedChainsList({
   chains,
   isLoading,
+  error,
   selectedChainId,
   onSelectChain,
   onRefresh,
@@ -129,11 +132,22 @@ export function SavedChainsList({
     setContainerWidth(event.nativeEvent.layout.width);
   }, []);
 
-  if (isLoading) {
+  if (isLoading && chains.length === 0) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="small" color={colors.primary} />
-        <Text style={styles.loadingText}>Loading saved stories...</Text>
+        <Text style={styles.loadingText}>Loading your stories…</Text>
+      </View>
+    );
+  }
+
+  // A fetch failure must not masquerade as an empty library.
+  if (error && chains.length === 0) {
+    return (
+      <View style={styles.emptyContainer}>
+        <Text style={styles.emptyIcon}>📡</Text>
+        <Text style={styles.emptyText}>{error}</Text>
+        <AppButton label="Try again" variant="secondary" onPress={onRefresh} style={styles.retryButton} />
       </View>
     );
   }
@@ -141,8 +155,9 @@ export function SavedChainsList({
   if (chains.length === 0) {
     return (
       <View style={styles.emptyContainer}>
-        <Text style={styles.emptyText}>No saved stories yet</Text>
-        <Text style={styles.emptySubtext}>Record your first story to get started!</Text>
+        <Text style={styles.emptyIcon}>🎙️</Text>
+        <Text style={styles.emptyText}>No stories yet</Text>
+        <Text style={styles.emptySubtext}>Tap “New Story” above to record your first idea.</Text>
       </View>
     );
   }
@@ -186,13 +201,22 @@ export function SavedChainsList({
   };
 
   return (
-    <ScrollView 
-      style={styles.container} 
+    <ScrollView
+      style={styles.container}
       contentContainerStyle={styles.scrollContent}
       onLayout={onContainerLayout}
+      refreshControl={
+        <RefreshControl
+          refreshing={isLoading}
+          onRefresh={onRefresh}
+          tintColor={colors.primary}
+          colors={[colors.primary]}
+        />
+      }
     >
       <View style={styles.listContainer}>
         {visibleChains.map((chain, index) => {
+          const clipCount = chain.segments.length;
           return (
             <TouchableOpacity
               key={chain.id}
@@ -200,17 +224,24 @@ export function SavedChainsList({
               onPress={() => onSelectChain(chain.id)}
               onLongPress={() => handleLongPress(chain.id)}
               activeOpacity={0.7}
+              accessibilityRole="button"
+              accessibilityLabel={`Open ${getStoryName(chain, index)}, ${clipCount} ${clipCount === 1 ? 'clip' : 'clips'}. Long-press to delete.`}
             >
               <View style={styles.timelineContainer}>
                 <TimelinePreview
                   segments={chain.segments}
                   totalDurationMs={chain.totalDurationMs}
-                  containerWidth={containerWidth}
+                  containerWidth={containerWidth - spacing.lg * 2}
                 />
               </View>
-              <Text style={styles.storyName}>
-                {getStoryName(chain, index)}
-              </Text>
+              <View style={styles.chainMeta}>
+                <Text style={styles.storyName}>
+                  {getStoryName(chain, index)}
+                </Text>
+                <Text style={styles.clipCount}>
+                  {clipCount} {clipCount === 1 ? 'clip' : 'clips'}
+                </Text>
+              </View>
             </TouchableOpacity>
           );
         })}
@@ -225,9 +256,9 @@ export function SavedChainsList({
       >
         <View style={modalStyles.overlay}>
           <View style={modalStyles.container}>
-            <Text style={modalStyles.title}>Delete Story?</Text>
+            <Text style={modalStyles.title}>Delete story?</Text>
             <Text style={modalStyles.message}>
-              Are you sure you want to delete this story? This will permanently delete all audio files and cannot be undone.
+              Clips unique to this story will be permanently removed. Clips shared with other stories are kept. This can't be undone.
             </Text>
             <View style={modalStyles.buttonContainer}>
               <TouchableOpacity
@@ -259,50 +290,69 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   scrollContent: {
-    paddingBottom: 20,
+    paddingBottom: spacing.xl,
   },
   listContainer: {
-    gap: 24,
-    paddingHorizontal: 0,
+    gap: spacing.md,
   },
   chainItem: {
     width: '100%',
-    // No background, no border, no padding
+    backgroundColor: colors.surface,
+    borderRadius: radius.lg,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
   },
   timelineContainer: {
     width: '100%',
-    marginBottom: 8,
+    marginBottom: spacing.md,
+  },
+  chainMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
   },
   storyName: {
-    fontSize: 16,
-    fontWeight: '500',
+    ...typography.heading,
     color: colors.textPrimary,
-    textAlign: 'left',
-    paddingHorizontal: 0,
+  },
+  clipCount: {
+    ...typography.caption,
+    color: colors.textSecondary,
   },
   loadingContainer: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 20,
-    gap: 8,
+    padding: spacing.xl,
+    gap: spacing.sm,
   },
   loadingText: {
     color: colors.textSecondary,
-    fontSize: 14,
+    ...typography.body,
   },
   emptyContainer: {
     alignItems: 'center',
-    padding: 20,
+    paddingVertical: spacing.xxxl,
+    paddingHorizontal: spacing.xl,
+    gap: spacing.sm,
+  },
+  emptyIcon: {
+    fontSize: 40,
+    marginBottom: spacing.xs,
   },
   emptyText: {
     color: colors.textSecondary,
-    fontSize: 14,
+    ...typography.heading,
+    textAlign: 'center',
   },
   emptySubtext: {
     color: colors.textTertiary,
-    fontSize: 12,
-    marginTop: 4,
+    ...typography.body,
+    textAlign: 'center',
+  },
+  retryButton: {
+    marginTop: spacing.md,
   },
 });
 

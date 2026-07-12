@@ -5,15 +5,23 @@
  * when available, falling back to expo-av otherwise.
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { View, Text, StyleSheet, Button, TouchableOpacity, Platform } from 'react-native';
+import { View, Text, StyleSheet, BackHandler } from 'react-native';
 import { AudioRecorder } from '../services/audioService';
 import { DuetTrackPlayer, DuetSegment, NativeDuetPlayer, getTapStoryAudio } from '../services/audio';
 import { CassettePlayerControls } from './CassettePlayerControls';
 import { AudioTimeline } from './AudioTimeline';
 import { SavedChainsList } from './SavedChainsList';
+import { AppButton } from './AppButton';
 import { getApiUrl } from '../utils/api';
-import { saveRecordingLocally, saveLatencyOffset, getLatencyOffset, localAudioExists, downloadAndCacheAudio } from '../services/audioStorage';
-import { colors } from '../utils/theme';
+import {
+  saveRecordingLocally,
+  saveLatencyOffset,
+  getLatencyOffset,
+  localAudioExists,
+  downloadAndCacheAudio,
+  deleteLocalAudio,
+} from '../services/audioStorage';
+import { colors, spacing, radius, typography } from '../utils/theme';
 import { LatencyNudge } from './LatencyNudge';
 import type {
   AudioChainSummary,
@@ -22,7 +30,30 @@ import type {
 } from '@shared/types/audio';
 import { getNextTimelineStartTimeMs } from '@shared/utils/audioTimeline';
 import { createPendingAudioSegment } from '../services/audio/pendingAudioSegment';
+import {
+  savePendingUpload,
+  removePendingUpload,
+  listPendingUploads,
+} from '../services/audio/pendingUploads';
 import { isAudioInteractionLocked } from './audioInteractionState';
+
+/** Turn native/developer error strings into something a musician can read. */
+function friendlyError(error: unknown): string {
+  const raw = error instanceof Error ? error.message : String(error ?? '');
+  if (/native audio engine|Expo Go|development build/i.test(raw)) {
+    return 'Layered recording needs the full app. Open Tap Story from your home screen, not Expo Go.';
+  }
+  if (/wired or built-in|UNSUPPORTED_SYNC_ROUTE|Bluetooth|AirPods|AirPlay/i.test(raw)) {
+    return 'Please unplug Bluetooth headphones. Layered recording needs the built-in mic or wired earbuds to stay in sync.';
+  }
+  if (/microphone|permission/i.test(raw)) {
+    return 'Tap Story needs microphone access. Enable it in Settings to record.';
+  }
+  if (/network|fetch|Failed to (fetch|upload|save)|timeout/i.test(raw)) {
+    return "Couldn't reach the server. Your recording is saved on this device — tap to retry.";
+  }
+  return 'Something went wrong. Your recording is safe on this device.';
+}
 
 // Type for player that works with both DuetTrackPlayer and NativeDuetPlayer
 type DuetPlayerType = DuetTrackPlayer | NativeDuetPlayer;
@@ -46,15 +77,18 @@ export function DuetRecorderWithTrackPlayer() {
   const [recordingStartTime, setRecordingStartTime] = useState(0); // Start time for current recording
   const [seekPreviewPosition, setSeekPreviewPosition] = useState<number | null>(null);
   const [processingSegmentIds, setProcessingSegmentIds] = useState<Set<string>>(new Set());  // Segments being uploaded/processed
+  const [failedSegmentIds, setFailedSegmentIds] = useState<Set<string>>(new Set());  // Takes whose upload failed (kept for retry)
   const [latencyOffsetMs, setLatencyOffsetMs] = useState(0);
 
   // Download state
   const [downloadingSegmentIds, setDownloadingSegmentIds] = useState<Set<string>>(new Set());
   const [isDownloadingAudio, setIsDownloadingAudio] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);  // Detail-view load/download failure
 
   // Saved chains state
   const [savedChains, setSavedChains] = useState<AudioChainSummary[]>([]);
   const [isLoadingChains, setIsLoadingChains] = useState(false);
+  const [chainsError, setChainsError] = useState<string | null>(null);  // Story-list fetch failure
 
   // View state
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
@@ -108,6 +142,8 @@ export function DuetRecorderWithTrackPlayer() {
     fetchSavedChains();
      // Load persisted latency offset for this device
     loadLatencyOffset();
+    // Flush any takes recorded offline in a previous session before they age.
+    flushPendingUploads();
     return () => {
       recorder.current.cleanup();
       player.current.cleanup();
@@ -119,6 +155,19 @@ export function DuetRecorderWithTrackPlayer() {
       }
     };
   }, []);
+
+  // Android hardware back should return to the story list from the detail
+  // view (never mid-take), not silently exit the whole app.
+  useEffect(() => {
+    const onBack = () => {
+      if (viewMode !== 'detail') return false;
+      if (isRecording || isWaitingToRecord) return true; // swallow; don't lose a take
+      goBackToList();
+      return true;
+    };
+    const sub = BackHandler.addEventListener('hardwareBackPress', onBack);
+    return () => sub.remove();
+  }, [viewMode, isRecording, isWaitingToRecord]);
 
   async function initAudio() {
     try {
@@ -140,7 +189,7 @@ export function DuetRecorderWithTrackPlayer() {
       }
     } catch (error) {
       console.error('[DuetRecorderWithTrackPlayer] Failed to initialize audio:', error);
-      setAudioError(error instanceof Error ? error.message : 'Failed to initialize audio');
+      setAudioError(friendlyError(error));
     }
   }
 
@@ -158,6 +207,7 @@ export function DuetRecorderWithTrackPlayer() {
   const fetchSavedChains = useCallback(async () => {
     try {
       setIsLoadingChains(true);
+      setChainsError(null);
       const response = await fetch(`${getApiUrl()}/api/audio/chains`);
       if (!response.ok) {
         throw new Error('Failed to fetch chains');
@@ -166,10 +216,103 @@ export function DuetRecorderWithTrackPlayer() {
       setSavedChains(data.chains);
     } catch (error) {
       console.error('[DuetRecorder] Failed to fetch chains:', error);
+      // Distinguish a real fetch failure from a genuinely empty library so the
+      // list does not masquerade a network outage as "No stories yet".
+      setChainsError("Couldn't load your stories. Check your connection and try again.");
     } finally {
       setIsLoadingChains(false);
     }
   }, []);
+
+  /**
+   * Upload a durable local take and register it on the server. Shared by the
+   * live save path, the retry affordance, and the launch-time flush. Returns
+   * the saved node (relinked to a local file keyed by its real id).
+   */
+  const uploadPendingRecord = useCallback(async (record: {
+    tempId: string;
+    localUri: string;
+    durationMs: number;
+    parentId: string | null;
+  }): Promise<{ node: AudioNode; localUri: string }> => {
+    const key = await recorder.current.uploadRecording(record.localUri);
+    const savePayload: SaveAudioRequest = {
+      key,
+      durationMs: record.durationMs,
+      parentId: record.parentId,
+    };
+    const saveResponse = await fetch(`${getApiUrl()}/api/audio/save`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(savePayload),
+    });
+    if (!saveResponse.ok) {
+      throw new Error('Failed to save audio metadata');
+    }
+    const savedNode = await saveResponse.json() as AudioNode;
+    // Relink the durable copy to the real node id, then drop the temp-keyed
+    // copy and the pending record — the take is now safely on the server.
+    const localUri = await saveRecordingLocally(record.localUri, savedNode.id);
+    await removePendingUpload(record.tempId);
+    await deleteLocalAudio(record.tempId);
+    return { node: savedNode, localUri };
+  }, []);
+
+  /** Retry the upload of a take that previously failed, from its durable copy. */
+  const retryUpload = useCallback(async (tempId: string) => {
+    const node = audioChain.find(n => n.id === tempId);
+    if (!node?.localUri) return;
+    setFailedSegmentIds(prev => { const next = new Set(prev); next.delete(tempId); return next; });
+    setProcessingSegmentIds(prev => new Set(prev).add(tempId));
+    setAudioError(null);
+    try {
+      const { node: savedNode, localUri } = await uploadPendingRecord({
+        tempId,
+        localUri: node.localUri,
+        durationMs: node.durationMs,
+        parentId: node.parentId,
+      });
+      setAudioChain(prev => prev.map(n => n.id === tempId ? {
+        id: savedNode.id,
+        audioUrl: savedNode.audioUrl,
+        parentId: savedNode.parentId,
+        durationMs: savedNode.durationMs,
+        startTimeMs: savedNode.startTimeMs,
+        duration: savedNode.durationMs / 1000,
+        startTime: savedNode.startTimeMs / 1000,
+        localUri,
+      } : n));
+      setCurrentNodeId(savedNode.id);
+    } catch (error) {
+      console.error('[DuetRecorder] Retry upload failed:', error);
+      setFailedSegmentIds(prev => new Set(prev).add(tempId));
+      setAudioError(friendlyError(error));
+    } finally {
+      setProcessingSegmentIds(prev => { const next = new Set(prev); next.delete(tempId); return next; });
+    }
+  }, [audioChain, uploadPendingRecord]);
+
+  /** On launch, push any takes recorded offline to the server in the background. */
+  const flushPendingUploads = useCallback(async () => {
+    let records: Awaited<ReturnType<typeof listPendingUploads>>;
+    try {
+      records = await listPendingUploads();
+    } catch {
+      return;
+    }
+    if (records.length === 0) return;
+    let anySucceeded = false;
+    for (const record of records) {
+      try {
+        await uploadPendingRecord(record);
+        anySucceeded = true;
+      } catch (error) {
+        // Leave it queued; it will retry on the next launch.
+        console.log('[DuetRecorder] Pending upload still failing, will retry later');
+      }
+    }
+    if (anySucceeded) fetchSavedChains();
+  }, [uploadPendingRecord, fetchSavedChains]);
 
   const deleteChain = useCallback(async (chainId: string) => {
     try {
@@ -187,7 +330,6 @@ export function DuetRecorderWithTrackPlayer() {
       }
 
       const result = await deleteResponse.json() as { nodeIds?: string[] };
-      const { deleteLocalAudio } = await import('../services/audioStorage');
       await Promise.all((result.nodeIds ?? []).map(async nodeId => {
         try {
           await deleteLocalAudio(nodeId);
@@ -213,7 +355,9 @@ export function DuetRecorderWithTrackPlayer() {
 
   async function loadChain(chainId: string) {
     setIsLoading(true);
+    setLoadError(null);
     const newDownloadingIds = new Set<string>();
+    const failedDownloadIds = new Set<string>();
 
     try {
       console.log('[DuetRecorder] Loading chain:', chainId);
@@ -257,25 +401,36 @@ export function DuetRecorderWithTrackPlayer() {
               const segment = chain.find(s => s.id === segmentId);
               if (segment) {
                 await downloadAndCacheAudio(segment.audioUrl, segment.id);
-                setDownloadingSegmentIds(prev => {
-                  const next = new Set(prev);
-                  next.delete(segmentId);
-                  return next;
-                });
               }
+              setDownloadingSegmentIds(prev => {
+                const next = new Set(prev);
+                next.delete(segmentId);
+                return next;
+              });
             } catch (error) {
               console.error(`Failed to download segment ${segmentId}:`, error);
-              // Keep in downloading set to show error state
+              failedDownloadIds.add(segmentId);
+              // Clear the "downloading" flag so the timeline stops spinning;
+              // the load error banner surfaces the retry instead.
+              setDownloadingSegmentIds(prev => {
+                const next = new Set(prev);
+                next.delete(segmentId);
+                return next;
+              });
             }
           })
         );
         setIsDownloadingAudio(false);
+        if (failedDownloadIds.size > 0) {
+          setLoadError("Some audio couldn't be downloaded. Check your connection and tap Retry.");
+        }
       }
 
     } catch (error) {
       console.error('[DuetRecorder] Failed to load chain:', error);
       setDownloadingSegmentIds(new Set());
       setIsDownloadingAudio(false);
+      setLoadError("Couldn't open this story. Check your connection and tap Retry.");
     } finally {
       setIsLoading(false);
     }
@@ -396,7 +551,7 @@ export function DuetRecorderWithTrackPlayer() {
       }
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
-      setAudioError(error instanceof Error ? error.message : 'Failed to start recording');
+      setAudioError(friendlyError(error));
       setIsRecording(false);
       setIsWaitingToRecord(false);
       setIsLoading(false);
@@ -435,7 +590,7 @@ export function DuetRecorderWithTrackPlayer() {
       }
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
-      setAudioError(error instanceof Error ? error.message : 'Failed to start recording');
+      setAudioError(friendlyError(error));
       setIsRecording(false);
       setIsWaitingToRecord(false);
     } finally {
@@ -444,6 +599,7 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function stopDuetRecording() {
+    let tempSegmentId: string | null = null;
     try {
       setIsLoading(true);
 
@@ -452,86 +608,46 @@ export function DuetRecorderWithTrackPlayer() {
         recordingDurationInterval.current = null;
       }
 
-      let tempUri: string;
-      let durationMs: number;
-      let startTimeMs: number;
-
-      if (isUsingNativeRef.current) {
-        // Native audio: stop player which also stops recording
-        const nativePlayer = player.current as NativeDuetPlayer;
-        const result = await nativePlayer.stop();
-        
-        if (!result) {
-          throw new Error('No recording result from native player');
-        }
-        
-        tempUri = result.uri;
-        durationMs = Math.max(1, Math.round(result.durationMs));
-        // Persist the canonical story rule, not a millisecond value that has
-        // made a lossy round-trip through device sample frames.
-        startTimeMs = getNextTimelineStartTimeMs(audioChain);
-        
-        console.log('[DuetRecorder] Native recording stopped:', {
-          uri: tempUri,
-          durationMs,
-          startTimeMs,
-        });
-      } else {
-        // Non-native: use AudioRecorder
-        const recordedFile = await recorder.current.stopRecording();
-        tempUri = recordedFile.uri;
-        durationMs = recordedFile.durationMs;
-        startTimeMs = Math.max(0, Math.round(recordingStartTime * 1000));
-        
-        if (isPlaying) {
-          await player.current.stop();
-        }
-      }
+      const take = await captureTake();
 
       setIsRecording(false);
       setRecordingDuration(0);
       setIsPlaying(false);
       stopPositionTracking();
 
-      console.log('[DuetRecorder] Saving segment metadata:', { startTimeMs, durationMs });
+      // Durability first: copy the take into permanent storage and record a
+      // pending upload BEFORE touching the network, so a flaky connection,
+      // backend outage, or app restart can never lose the recording.
+      tempSegmentId = `temp-${Date.now()}`;
+      const durableUri = await saveRecordingLocally(take.uri, tempSegmentId);
+      await savePendingUpload({
+        tempId: tempSegmentId,
+        localUri: durableUri,
+        durationMs: take.durationMs,
+        startTimeMs: take.startTimeMs,
+        parentId: currentNodeId,
+        createdAt: Date.now(),
+      });
 
-      // Create temporary segment ID for the new recording
-      const tempSegmentId = `temp-${Date.now()}`;
-      
-      // Add segment to chain immediately with temporary data (before upload)
+      // Optimistically show the take on the timeline (playable from the durable
+      // local copy) and mark it uploading.
       const tempNode: AudioChainNode = createPendingAudioSegment({
         id: tempSegmentId,
-        recordingUri: tempUri,
-        durationMs,
-        startTimeMs,
+        recordingUri: durableUri,
+        durationMs: take.durationMs,
+        startTimeMs: take.startTimeMs,
         parentId: currentNodeId,
       });
+      setAudioChain(prev => [...prev, tempNode]);
+      setProcessingSegmentIds(prev => new Set(prev).add(tempSegmentId!));
+      setIsLoading(false); // Don't block the whole UI on the network round-trip.
 
-      // Add to chain and mark as processing
-      const newChain = [...audioChain, tempNode];
-      setAudioChain(newChain);
-      setProcessingSegmentIds(prev => new Set([...prev, tempSegmentId]));
-
-      const key = await recorder.current.uploadRecording(tempUri);
-
-      const savePayload: SaveAudioRequest = {
-        key,
-        durationMs,
+      const { node: savedNode, localUri } = await uploadPendingRecord({
+        tempId: tempSegmentId,
+        localUri: durableUri,
+        durationMs: take.durationMs,
         parentId: currentNodeId,
-      };
-
-      const saveResponse = await fetch(`${getApiUrl()}/api/audio/save`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(savePayload),
       });
-
-      if (!saveResponse.ok) {
-        throw new Error('Failed to save audio metadata');
-      }
-
-      const savedNode = await saveResponse.json() as AudioNode;
-      const localUri = await saveRecordingLocally(tempUri, savedNode.id);
 
       const nodeWithLocalUri: AudioChainNode = {
         id: savedNode.id,
@@ -543,43 +659,58 @@ export function DuetRecorderWithTrackPlayer() {
         startTime: savedNode.startTimeMs / 1000,
         localUri,
       };
-
-      // Replace temp node with real node
-      const updatedChain = newChain.map(node => 
-        node.id === tempSegmentId ? nodeWithLocalUri : node
-      );
-
-      setAudioChain(updatedChain);
+      setAudioChain(prev => prev.map(node => node.id === tempSegmentId ? nodeWithLocalUri : node));
       setCurrentNodeId(savedNode.id);
-      
-      // Remove from processing set
-      setProcessingSegmentIds(prev => {
-        const next = new Set(prev);
-        next.delete(tempSegmentId);
-        return next;
-      });
+      setProcessingSegmentIds(prev => { const next = new Set(prev); next.delete(tempSegmentId!); return next; });
     } catch (error) {
       console.error('[DuetRecorderWithTrackPlayer] Recording save error:', error);
-      setAudioError(error instanceof Error ? error.message : 'Failed to finalize recording');
       setIsRecording(false);
       setIsWaitingToRecord(false);
       setIsPlaying(false);
       setRecordingDuration(0);
       stopPositionTracking();
-      // Remove the temp segment on error
-      setAudioChain(prev => prev.filter(node => !node.id.startsWith('temp-')));
-      setProcessingSegmentIds(prev => {
-        const next = new Set(prev);
-        Array.from(prev).forEach(id => {
-          if (id.startsWith('temp-')) {
-            next.delete(id);
-          }
-        });
-        return next;
-      });
+
+      if (tempSegmentId) {
+        // The take is durably saved and queued — keep it visible with a
+        // tap-to-retry affordance instead of discarding it.
+        setProcessingSegmentIds(prev => { const next = new Set(prev); next.delete(tempSegmentId!); return next; });
+        setFailedSegmentIds(prev => new Set(prev).add(tempSegmentId!));
+        setAudioError(friendlyError(error));
+      } else {
+        // Failure before the take was even captured — nothing to keep.
+        setAudioError(friendlyError(error));
+      }
     } finally {
       setIsLoading(false);
     }
+  }
+
+  /** Stop the active recording and return the raw take (native or expo-av). */
+  async function captureTake(): Promise<{ uri: string; durationMs: number; startTimeMs: number }> {
+    if (isUsingNativeRef.current) {
+      const nativePlayer = player.current as NativeDuetPlayer;
+      const result = await nativePlayer.stop();
+      if (!result) {
+        throw new Error('No recording result from native player');
+      }
+      return {
+        uri: result.uri,
+        durationMs: Math.max(1, Math.round(result.durationMs)),
+        // Persist the canonical story rule, not a millisecond value that has
+        // made a lossy round-trip through device sample frames.
+        startTimeMs: getNextTimelineStartTimeMs(audioChain),
+      };
+    }
+
+    const recordedFile = await recorder.current.stopRecording();
+    if (isPlaying) {
+      await player.current.stop();
+    }
+    return {
+      uri: recordedFile.uri,
+      durationMs: recordedFile.durationMs,
+      startTimeMs: Math.max(0, Math.round(recordingStartTime * 1000)),
+    };
   }
 
   async function handleRecordPress() {
@@ -589,14 +720,6 @@ export function DuetRecorderWithTrackPlayer() {
     } else {
       await startDuetRecording();
     }
-  }
-
-  async function resetChain() {
-    setAudioChain([]);
-    setCurrentNodeId(null);
-    setViewMode('list');
-    await player.current.cleanup();
-    fetchSavedChains();
   }
 
   function startNewStory() {
@@ -624,7 +747,7 @@ export function DuetRecorderWithTrackPlayer() {
       await player.current.stop();
     } catch (error) {
       console.error('[DuetRecorder] Failed to cancel playback session:', error);
-      setAudioError(error instanceof Error ? error.message : 'Failed to stop audio session');
+      setAudioError(friendlyError(error));
     } finally {
       setIsPlaying(false);
       setIsWaitingToRecord(false);
@@ -642,6 +765,29 @@ export function DuetRecorderWithTrackPlayer() {
       await stopDuetRecording();
     } else {
       await stopPlayback();
+    }
+  }
+
+  /** Stop the in-progress take and throw it away without saving or uploading. */
+  async function discardTake() {
+    if (recordingDurationInterval.current) {
+      clearInterval(recordingDurationInterval.current);
+      recordingDurationInterval.current = null;
+    }
+    try {
+      await player.current.stop();
+      if (!isUsingNativeRef.current) {
+        await recorder.current.stopRecording().catch(() => undefined);
+      }
+    } catch (error) {
+      console.log('[DuetRecorder] Discard stop error (ignored):', error);
+    } finally {
+      setIsRecording(false);
+      setIsWaitingToRecord(false);
+      setIsPlaying(false);
+      setRecordingDuration(0);
+      stopPositionTracking();
+      setAudioError(null);
     }
   }
 
@@ -768,17 +914,21 @@ export function DuetRecorderWithTrackPlayer() {
       <View style={styles.listContainer}>
         <View style={styles.listHeader}>
           <Text style={styles.title}>Tap Story</Text>
-          <Text style={styles.subtitle}>Your Stories</Text>
+          <Text style={styles.subtitle}>Record an idea. Pass it on. Build it together.</Text>
         </View>
 
-        <View style={styles.newStoryButton}>
-          <Button title="+ New Story" onPress={startNewStory} />
-        </View>
+        <AppButton
+          label="New Story"
+          onPress={startNewStory}
+          accessibilityHint="Start a new blank story to record into"
+          style={styles.newStoryButton}
+        />
 
         <View style={styles.savedChainsFullContainer}>
           <SavedChainsList
             chains={savedChains}
             isLoading={isLoadingChains}
+            error={chainsError}
             selectedChainId={null}
             onSelectChain={loadChain}
             onRefresh={fetchSavedChains}
@@ -790,10 +940,35 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   // DETAIL VIEW
+  const failedSegmentId = audioChain.find(node => failedSegmentIds.has(node.id))?.id;
+  const statusMessage = isWaitingToRecord
+    ? 'Get ready — recording starts at the mark…'
+    : isRecording && isPlaying
+      ? 'Recording along with the story…'
+      : isRecording
+        ? 'Recording…'
+        : null;
+
   return (
     <View style={styles.detailContainer}>
-      <View style={styles.backButtonContainer}>
-        <Button title="< Back" onPress={goBackToList} disabled={isLoading || isRecording || isWaitingToRecord} />
+      <View style={styles.detailHeader}>
+        <AppButton
+          label="‹ Stories"
+          variant="ghost"
+          onPress={goBackToList}
+          disabled={isLoading || isRecording || isWaitingToRecord}
+          style={styles.backButton}
+        />
+        <Text style={styles.chainInfo}>
+          {audioChain.length === 0
+            ? 'New story'
+            : `${audioChain.length} ${audioChain.length === 1 ? 'clip' : 'clips'}`}
+        </Text>
+        {usingNativeAudio ? (
+          <Text style={styles.syncBadge}>⚡ Synced</Text>
+        ) : (
+          <View style={styles.headerSpacer} />
+        )}
       </View>
 
       {/* Timeline */}
@@ -819,24 +994,40 @@ export function DuetRecorderWithTrackPlayer() {
         />
       </View>
 
-      {/* Status info */}
+      {/* Status + error banners */}
       <View style={styles.info}>
-        <Text style={styles.chainInfo}>
-          {audioChain.length} {audioChain.length === 1 ? 'segment' : 'segments'}
-        </Text>
-        {usingNativeAudio && (
-          <Text style={styles.syncStatus}>⚡ Native sync engine</Text>
+        {statusMessage && (
+          <Text style={[styles.statusText, isWaitingToRecord ? styles.waitingText : styles.recordingText]}>
+            {statusMessage}
+          </Text>
         )}
-        {audioError && <Text style={styles.errorText}>{audioError}</Text>}
-        {isRecording && isPlaying && (
-          <Text style={styles.recordingText}>Recording while playing...</Text>
+
+        {(loadError || (audioError && !failedSegmentId)) && (
+          <View style={styles.banner}>
+            <Text style={styles.bannerText}>{loadError ?? audioError}</Text>
+            {loadError && currentNodeId && (
+              <AppButton label="Retry" variant="secondary" onPress={() => loadChain(currentNodeId)} style={styles.bannerButton} />
+            )}
+          </View>
         )}
-        {isRecording && !isPlaying && (
-          <Text style={styles.recordingText}>Recording...</Text>
+
+        {failedSegmentId && (
+          <View style={styles.banner}>
+            <Text style={styles.bannerText}>
+              Your take is saved on this device but hasn't uploaded yet.
+            </Text>
+            <AppButton
+              label="Retry upload"
+              variant="secondary"
+              onPress={() => retryUpload(failedSegmentId)}
+              loading={processingSegmentIds.has(failedSegmentId)}
+              style={styles.bannerButton}
+            />
+          </View>
         )}
       </View>
 
-      {/* Cassette player controls */}
+      {/* Transport controls */}
       <CassettePlayerControls
         isPlaying={isPlaying}
         isRecording={isRecording}
@@ -852,24 +1043,32 @@ export function DuetRecorderWithTrackPlayer() {
         onFastForward={handleFastForward}
       />
 
-      {/* Zero uses route auto-detection; a measured value overrides it. */}
-      {usingNativeAudio && (
+      {/* Discard affordance while a take is in progress */}
+      {(isRecording || isWaitingToRecord) && (
+        <AppButton
+          label="Discard take"
+          variant="ghost"
+          onPress={discardTake}
+          style={styles.discardButton}
+          accessibilityHint="Stop recording without saving this take"
+        />
+      )}
+
+      {/* Fine-tune sync (auto-detected route latency, nudged per device) */}
+      {usingNativeAudio && !isRecording && !isWaitingToRecord && audioChain.length > 0 && (
         <LatencyNudge
           offsetMs={latencyOffsetMs}
           onOffsetChange={handleLatencyChange}
-          disabled={isRecording || isPlaying || isWaitingToRecord}
+          disabled={isPlaying}
         />
       )}
 
       {/* Hint text */}
-      {audioChain.length === 0 && (
+      {!isRecording && !isWaitingToRecord && (
         <Text style={styles.hint}>
-          Tap the record button to start your first recording.
-        </Text>
-      )}
-      {audioChain.length > 0 && (
-        <Text style={styles.hint}>
-          Tap record to add to the story.
+          {audioChain.length === 0
+            ? 'Tap the red button to record your first idea.'
+            : 'Tap play to listen, or record to add the next part.'}
         </Text>
       )}
     </View>
@@ -879,73 +1078,104 @@ export function DuetRecorderWithTrackPlayer() {
 const styles = StyleSheet.create({
   listContainer: {
     flex: 1,
-    paddingTop: 60,
-    paddingHorizontal: 20,
+    paddingTop: spacing.lg,
+    paddingHorizontal: spacing.xl,
     backgroundColor: colors.background,
   },
   listHeader: {
-    alignItems: 'center',
-    marginBottom: 20,
+    marginTop: spacing.lg,
+    marginBottom: spacing.xl,
   },
   newStoryButton: {
-    marginBottom: 20,
+    marginBottom: spacing.xl,
   },
   savedChainsFullContainer: {
     flex: 1,
   },
   detailContainer: {
     flex: 1,
-    paddingTop: 60,
+    paddingTop: spacing.md,
     backgroundColor: colors.background,
   },
-  backButtonContainer: {
-    paddingHorizontal: 20,
-    marginBottom: 20,
-    alignItems: 'flex-start',
+  detailHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: spacing.lg,
+    marginBottom: spacing.lg,
+  },
+  backButton: {
+    paddingHorizontal: 0,
+    minHeight: 36,
+  },
+  headerSpacer: {
+    width: 72,
   },
   timelineFullWidth: {
     width: '100%',
   },
   title: {
-    fontSize: 32,
-    fontWeight: 'bold',
-    marginBottom: 4,
+    ...typography.display,
     color: colors.textPrimary,
+    marginBottom: spacing.xs,
   },
   subtitle: {
-    fontSize: 18,
+    ...typography.body,
     color: colors.textSecondary,
   },
   info: {
-    paddingHorizontal: 20,
-    marginTop: 20,
+    paddingHorizontal: spacing.xl,
+    marginTop: spacing.lg,
     alignItems: 'center',
+    gap: spacing.md,
   },
   chainInfo: {
-    fontSize: 16,
+    ...typography.heading,
     color: colors.textPrimary,
   },
-  syncStatus: {
-    fontSize: 12,
-    color: '#4CAF50',
-    marginTop: 4,
-    fontWeight: '500',
+  syncBadge: {
+    ...typography.label,
+    color: colors.success,
+    width: 72,
+    textAlign: 'right',
+  },
+  statusText: {
+    ...typography.heading,
+    textAlign: 'center',
   },
   recordingText: {
     color: colors.recording,
-    marginTop: 8,
-    fontWeight: '600',
   },
-  errorText: {
-    color: colors.recording,
-    marginTop: 8,
+  waitingText: {
+    color: colors.waiting,
+  },
+  banner: {
+    width: '100%',
+    backgroundColor: colors.surface,
+    borderRadius: radius.md,
+    borderWidth: 1,
+    borderColor: colors.border,
+    padding: spacing.lg,
+    gap: spacing.md,
+    alignItems: 'center',
+  },
+  bannerText: {
+    ...typography.body,
+    color: colors.textSecondary,
     textAlign: 'center',
+  },
+  bannerButton: {
+    alignSelf: 'stretch',
+  },
+  discardButton: {
+    alignSelf: 'center',
+    marginTop: spacing.xs,
   },
   hint: {
-    marginTop: 20,
+    marginTop: spacing.xl,
     color: colors.textSecondary,
-    fontSize: 12,
+    ...typography.caption,
     textAlign: 'center',
-    paddingHorizontal: 20,
+    paddingHorizontal: spacing.xl,
   },
 });
