@@ -68,14 +68,23 @@ export function CassettePlayerControls({
     isRecording,
     isWaitingToRecord,
   });
+  const recordLabel = isRecording
+    ? 'Stop recording'
+    : isWaitingToRecord
+      ? 'Waiting to record'
+      : 'Record';
+
   return (
     <View style={styles.container}>
       <View style={styles.buttonRow}>
         {/* Rewind button */}
         <TouchableOpacity
-          style={[styles.button, styles.secondaryButton]}
+          style={[styles.button, styles.secondaryButton, seekDisabled && styles.buttonDisabled]}
           onPress={onRewind}
           disabled={seekDisabled}
+          accessibilityRole="button"
+          accessibilityLabel="Rewind to start"
+          accessibilityState={{ disabled: seekDisabled }}
         >
           <DoubleTriangle direction="left" />
         </TouchableOpacity>
@@ -83,9 +92,12 @@ export function CassettePlayerControls({
         {/* Stop button (Square) - show when playing or recording */}
         {(isPlaying || isRecording || isWaitingToRecord) && (
           <TouchableOpacity
-            style={[styles.button, styles.stopButton]}
+            style={[styles.button, styles.stopButton, stopDisabled && styles.buttonDisabled]}
             onPress={onStop}
             disabled={stopDisabled}
+            accessibilityRole="button"
+            accessibilityLabel="Stop"
+            accessibilityState={{ disabled: stopDisabled }}
           >
             <View style={styles.square} />
           </TouchableOpacity>
@@ -94,9 +106,12 @@ export function CassettePlayerControls({
         {/* Play button (Triangle) - only show when not playing */}
         {!isPlaying && (
           <TouchableOpacity
-            style={[styles.button, styles.playButton]}
+            style={[styles.button, styles.playButton, playDisabled && styles.buttonDisabled]}
             onPress={onPlay}
             disabled={playDisabled}
+            accessibilityRole="button"
+            accessibilityLabel="Play"
+            accessibilityState={{ disabled: playDisabled }}
           >
             <View style={styles.triangle} />
           </TouchableOpacity>
@@ -109,18 +124,25 @@ export function CassettePlayerControls({
             styles.recordButton,
             isRecording && styles.recordButtonActive,
             isWaitingToRecord && styles.recordButtonWaiting,
+            recordDisabled && styles.buttonDisabled,
           ]}
           onPress={onRecord}
           disabled={recordDisabled}
+          accessibilityRole="button"
+          accessibilityLabel={recordLabel}
+          accessibilityState={{ disabled: recordDisabled }}
         >
           <View style={styles.circle} />
         </TouchableOpacity>
 
         {/* Fast Forward button */}
         <TouchableOpacity
-          style={[styles.button, styles.secondaryButton]}
+          style={[styles.button, styles.secondaryButton, seekDisabled && styles.buttonDisabled]}
           onPress={onFastForward}
           disabled={seekDisabled}
+          accessibilityRole="button"
+          accessibilityLabel="Skip to end"
+          accessibilityState={{ disabled: seekDisabled }}
         >
           <DoubleTriangle direction="right" />
         </TouchableOpacity>
@@ -171,6 +193,9 @@ const styles = StyleSheet.create({
     backgroundColor: colors.surface,
     borderWidth: 2,
     borderColor: colors.border,
+  },
+  buttonDisabled: {
+    opacity: 0.3,
   },
   secondaryButton: {
     width: 50,

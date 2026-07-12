@@ -30,6 +30,105 @@ interface AudioTimelineProps {
 
 const MIN_WIDTH_PX = 30; // Minimum segment width in pixels
 
+interface AnimatedSegmentProps {
+  segment: AudioSegment;
+  isRecordingSegment: boolean;
+  width: number;
+  left: number;
+  isPlaying: boolean;
+  onSegmentTap?: (segment: AudioSegment) => void;
+  recordingDuration: number;
+  isProcessing: boolean;
+  isDownloading: boolean;
+}
+
+// Module-scoped so its component identity is stable. Declaring it inside
+// AudioTimeline made React remount every segment on each 100ms playback tick,
+// which killed the glow animation and swallowed in-progress taps.
+const AnimatedSegment = React.memo(function AnimatedSegment({
+  segment,
+  isRecordingSegment,
+  width,
+  left,
+  isPlaying,
+  onSegmentTap,
+  recordingDuration,
+  isProcessing,
+  isDownloading,
+}: AnimatedSegmentProps) {
+  const glowOpacity = useSharedValue(isPlaying ? 1 : 0);
+  const brightness = useSharedValue(isPlaying ? 1 : 0);
+
+  useEffect(() => {
+    glowOpacity.value = withTiming(isPlaying ? 1 : 0, { duration: 300 });
+    brightness.value = withTiming(isPlaying ? 1 : 0, { duration: 300 });
+  }, [isPlaying, glowOpacity, brightness]);
+
+  const animatedStyle = useAnimatedStyle(() => {
+    // Priority: downloading > processing > normal
+    let baseColor;
+    if (isDownloading) {
+      baseColor = ['rgba(136, 136, 136, 0.5)', 'rgba(136, 136, 136, 0.5)']; // Gray for downloading
+    } else if (isProcessing) {
+      baseColor = ['rgba(255, 149, 0, 0.7)', 'rgba(255, 204, 0, 0.9)']; // Orange to yellow for processing
+    } else {
+      baseColor = ['rgba(88, 28, 135, 0.85)', 'rgba(147, 51, 234, 1.0)']; // Dark purple to bright purple
+    }
+
+    const backgroundColor = interpolateColor(brightness.value, [0, 1], baseColor);
+
+    return {
+      backgroundColor,
+      shadowOpacity: glowOpacity.value * 0.6,
+      shadowRadius: 8 + glowOpacity.value * 12,
+      elevation: glowOpacity.value * 15,
+    };
+  });
+
+  const segmentStyle = [
+    styles.segmentBar,
+    {
+      width,
+      position: 'absolute' as const,
+      left,
+    },
+    isRecordingSegment && styles.recordingSegment,
+    isProcessing && styles.processingSegment,
+    isDownloading && styles.downloadingSegment,
+  ];
+
+  const SegmentComponent = isRecordingSegment ? View : TouchableOpacity;
+  const segmentProps = isRecordingSegment
+    ? {}
+    : {
+        onPress: () => onSegmentTap?.(segment),
+        activeOpacity: 0.7,
+        accessibilityRole: 'button' as const,
+        accessibilityLabel: `Play segment, ${segment.duration.toFixed(1)} seconds`,
+      };
+
+  return (
+    <Animated.View
+      style={[
+        segmentStyle,
+        animatedStyle,
+        {
+          shadowColor: '#9333EA', // Purple glow color
+          shadowOffset: { width: 0, height: 0 },
+        },
+      ]}
+    >
+      <SegmentComponent {...segmentProps} style={styles.segmentInner}>
+        <Text style={styles.segmentText} numberOfLines={1}>
+          {isRecordingSegment
+            ? `${recordingDuration.toFixed(1)}s`
+            : `${segment.duration.toFixed(1)}s`}
+        </Text>
+      </SegmentComponent>
+    </Animated.View>
+  );
+});
+
 export function AudioTimeline({
   segments,
   onSegmentTap,
@@ -248,115 +347,9 @@ export function AudioTimeline({
     );
   };
 
-  // Animated segment component
-  const AnimatedSegment = React.memo(({
-    segment,
-    index,
-    isRecordingSegment,
-    width,
-    left,
-    isPlaying,
-    onSegmentTap,
-    recordingDuration,
-    isProcessing,
-    isDownloading,
-  }: {
-    segment: AudioSegment;
-    index: number;
-    isRecordingSegment: boolean;
-    width: number;
-    left: number;
-    isPlaying: boolean;
-    onSegmentTap?: (segment: AudioSegment) => void;
-    recordingDuration: number;
-    isProcessing: boolean;
-    isDownloading: boolean;
-  }) => {
-    // Animated values for glow effect
-    const glowOpacity = useSharedValue(isPlaying ? 1 : 0);
-    const brightness = useSharedValue(isPlaying ? 1 : 0);
-
-    // Update animation values when playing state changes
-    useEffect(() => {
-      glowOpacity.value = withTiming(isPlaying ? 1 : 0, { duration: 300 });
-      brightness.value = withTiming(isPlaying ? 1 : 0, { duration: 300 });
-    }, [isPlaying, glowOpacity, brightness]);
-
-    // Animated style for the segment
-    const animatedStyle = useAnimatedStyle(() => {
-      // Priority: downloading > processing > normal
-      let baseColor;
-      if (isDownloading) {
-        baseColor = ['rgba(136, 136, 136, 0.5)', 'rgba(136, 136, 136, 0.5)']; // Gray for downloading
-      } else if (isProcessing) {
-        baseColor = ['rgba(255, 149, 0, 0.7)', 'rgba(255, 204, 0, 0.9)']; // Orange to yellow for processing
-      } else {
-        baseColor = ['rgba(88, 28, 135, 0.85)', 'rgba(147, 51, 234, 1.0)']; // Dark purple to bright purple
-      }
-      
-      const backgroundColor = interpolateColor(
-        brightness.value,
-        [0, 1],
-        baseColor
-      );
-      
-      return {
-        backgroundColor,
-        shadowOpacity: glowOpacity.value * 0.6,
-        shadowRadius: 8 + glowOpacity.value * 12,
-        elevation: glowOpacity.value * 15,
-      };
-    });
-
-    const segmentStyle = [
-      styles.segmentBar,
-      {
-        width,
-        position: 'absolute' as const,
-        left,
-      },
-      isRecordingSegment && styles.recordingSegment,
-      isProcessing && styles.processingSegment,
-      isDownloading && styles.downloadingSegment,
-    ];
-
-    const SegmentComponent = isRecordingSegment ? View : TouchableOpacity;
-    const segmentProps = isRecordingSegment
-      ? {}
-      : {
-          onPress: () => onSegmentTap?.(segment),
-          activeOpacity: 0.7,
-        };
-
-    return (
-      <Animated.View
-        style={[
-          segmentStyle,
-          animatedStyle,
-          {
-            shadowColor: '#9333EA', // Purple glow color
-            shadowOffset: { width: 0, height: 0 },
-          },
-        ]}
-      >
-        <SegmentComponent
-          {...segmentProps}
-          style={styles.segmentInner}
-        >
-          <Text style={styles.segmentText} numberOfLines={1}>
-            {isRecordingSegment
-              ? `${recordingDuration.toFixed(1)}s`
-              : `${segment.duration}s`}
-          </Text>
-        </SegmentComponent>
-      </Animated.View>
-    );
-  });
-
   // Render a segment
   const renderSegment = (
     segment: AudioSegment,
-    index: number,
     isRecordingSegment: boolean = false
   ) => {
     const width = timeToWidth(segment.duration);
@@ -369,7 +362,6 @@ export function AudioTimeline({
       <AnimatedSegment
         key={segment.id}
         segment={segment}
-        index={index}
         isRecordingSegment={isRecordingSegment}
         width={width}
         left={left}
@@ -396,8 +388,8 @@ export function AudioTimeline({
 
       {/* Top row - even indices (0, 2, 4, ...) */}
       <View style={styles.trackRow}>
-        {topRowSegments.map(({ segment, index }) =>
-          renderSegment(segment, index)
+        {topRowSegments.map(({ segment }) =>
+          renderSegment(segment)
         )}
         {/* Recording segment on top row if next index would be even */}
         {isRecording && segments.length % 2 === 0 && (
@@ -421,8 +413,8 @@ export function AudioTimeline({
 
       {/* Bottom row - odd indices (1, 3, 5, ...) */}
       <View style={styles.trackRow}>
-        {bottomRowSegments.map(({ segment, index }) =>
-          renderSegment(segment, index)
+        {bottomRowSegments.map(({ segment }) =>
+          renderSegment(segment)
         )}
         {/* Recording segment on bottom row if next index would be odd */}
         {isRecording && segments.length % 2 === 1 && (
