@@ -132,7 +132,7 @@ Postgres is managed automatically by devenv. You can connect to the database usi
 
 ```
 Host: localhost
-Port: 5432
+Port: 55432
 Database: tapstory
 Username: tapstory_user
 Password: tapstory_password
@@ -178,7 +178,7 @@ The app's core feature is "duet recording" - a collaborative audio chain where u
 
 1. **First Recording (A)**: User presses Record, records audio, presses Stop. Recording starts at timeline position 0.
 2. **Second Recording (B)**: User presses Record again. Recording A plays back while user records B simultaneously. Recording B also starts at position 0, creating a duet.
-3. **Third+ Recording (C, D, ...)**: Previous recordings play back. New recording starts when the *oldest* still-playing track ends, creating a cascading chain.
+3. **Third+ Recording (C, D, ...)**: Previous recordings play back. Each new recording begins at the exact end of the recording two positions back, preserving the alternating two-track chain.
 
 ### Timeline Example
 
@@ -205,7 +205,7 @@ flowchart TD
         D[Start recording immediately at t=0]
         E{Is this the second recording?}
         F[Play recording 1, start recording at t=0]
-        G[Calculate start time: when oldest track ends]
+        G[Calculate start time: end of segment two positions back]
         H[Play all previous recordings from t=0]
         I{Reached punch-in point?}
         J[Start recording at calculated time]
@@ -219,8 +219,8 @@ flowchart TD
     end
 
     subgraph Save Flow
-        O[Stop recording]
-        P[Stop playback]
+        O[Mute playback and drain input tail]
+        P[Finalize and validate recording]
         Q[Upload to S3]
         R[Save metadata to database]
         S[Cache locally]
@@ -259,11 +259,11 @@ flowchart TD
 ```mermaid
 flowchart LR
     subgraph Mobile App
-        DR[DuetRecorder]
-        RB[RecordButton]
+        DR[DuetRecorderWithTrackPlayer]
+        RB[CassettePlayerControls]
         AT[AudioTimeline]
-        AR[AudioRecorder Service]
-        DP[DuetPlayer Service]
+        AR[Audio Upload Service]
+        DP[NativeDuetPlayer]
     end
 
     subgraph Backend
@@ -277,8 +277,8 @@ flowchart LR
     DR --> AR
     DR --> DP
 
-    AR -->|Upload audio| API
-    API -->|Store file| S3
+    AR -->|Request presigned URL| API
+    AR -->|Direct audio upload| S3
     API -->|Save metadata| DB
 
     DP -->|Fetch audio| S3
@@ -288,11 +288,11 @@ flowchart LR
 
 | File | Purpose |
 |------|---------|
-| `mobile/components/DuetRecorder.tsx` | Main recording orchestration component |
-| `mobile/components/RecordButton.tsx` | Visual button with Record/Waiting/Stop states |
+| `mobile/components/DuetRecorderWithTrackPlayer.tsx` | Active recording orchestration component |
+| `mobile/components/CassettePlayerControls.tsx` | Active transport and Record/Waiting/Stop controls |
 | `mobile/components/AudioTimeline.tsx` | Timeline visualization with pinch-to-zoom |
 | `mobile/services/audioService.ts` | Recording and S3 upload handling |
-| `mobile/services/duetPlayer.ts` | Overlapping playback of multiple audio segments |
+| `mobile/services/audio/NativeDuetPlayer.ts` | Native synchronized playback/recording session |
 | `backend/src/routes/audioRoutes.ts` | API endpoints for audio upload/metadata |
 
 ---

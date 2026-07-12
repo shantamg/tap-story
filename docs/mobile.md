@@ -1,181 +1,119 @@
-# Mobile App Documentation
-
-> **Note:** This document will be expanded as the mobile app is built. Currently describes planned structure.
+# Mobile App Architecture
 
 ## Overview
 
-The mobile app is a React Native + Expo application for iOS and Android, providing the primary interface for recording, playing, and navigating audio stories.
+The mobile workspace is a React Native/Expo app with checked-in native iOS and
+Android projects. The home screen uses `DuetRecorderWithTrackPlayer` to list
+saved chains, download missing stems, display the two-lane timeline, play a
+story, and add a recording.
 
-## Project Structure
+## Active audio stack
 
-```
-mobile/
-├── app/                    # Expo Router screens
-│   ├── _layout.tsx         # Root layout
-│   ├── index.tsx           # Home screen
-│   └── record.tsx          # Recording interface (planned)
-├── services/
-│   ├── audioService.ts     # ✅ Audio recording service (implemented)
-│   ├── duetPlayer.ts       # ✅ Duet playback with audio chaining (implemented)
-│   ├── audio/
-│   │   ├── AudioRecorderInterface.ts    # Abstract interface
-│   │   ├── ExpoAudioRecorder.ts         # Expo-av implementation
-│   │   └── AudioRecorderFactory.ts      # Returns correct implementation
-│   └── api.ts              # Backend API client (planned)
-├── components/             # Reusable UI components
-│   ├── RecordButton.tsx    # Recording control (planned)
-│   ├── PlaybackControls.tsx # Playback UI (planned)
-│   └── ProgressBar.tsx     # Progress indicator (planned)
-├── hooks/
-│   ├── useAudioRecorder.ts # Recording hook (planned)
-│   └── useAudioSession.ts  # Audio mode config (planned)
-└── types/
-    └── audio.ts            # Mobile-specific types (planned)
+```text
+DuetRecorderWithTrackPlayer
+  -> NativeDuetPlayer
+    -> TapStoryNativeAudio (React Native bridge wrapper)
+      -> Android: Kotlin decoder/bridge + Oboe C++ duplex engine
+      -> iOS: Swift decoder/bridge + RemoteIO AudioUnit engine
 ```
 
-## Technology Stack
+When the native module is unavailable, Expo AV can record the first take and
+provide ordinary playback. Synchronized overdubbing is blocked in that mode;
+JavaScript promise/interval timing is not reliable enough for the product's
+alignment guarantee. The fallback persists Expo's finalized media duration,
+not a wall-clock estimate, so a later native continuation still receives an
+accurate timeline boundary.
 
-- **React Native** - Cross-platform mobile framework
-- **Expo** - Development tooling and managed services
-- **Expo Router** - File-based navigation
-- **expo-av** - Audio recording and playback (initial implementation)
+## Recording session
 
-## Audio Architecture
+1. `AudioRecorder.init()` requests runtime microphone permission on every
+   platform, including native mode.
+2. Existing local/remote stems are decoded to mono PCM and resampled to the
+   native duplex rate.
+3. The native engine uses input-only latency for a standalone first take and
+   round-trip route latency for an overdub. A signed fine-tune may adjust the
+   automatic value. Bluetooth-class routes are rejected for overdubs.
+4. Playback starts from the requested position and capture is armed at the
+   planned punch point.
+5. The engine publishes `onRecordingStarted` only after it accepts the first
+   real input sample; the event is not emitted merely because recording was
+   armed.
+6. Stop publishes a realtime-safe tail request. The first native callback that
+   observes it mutes the backing mix, drains the compensated input tail through
+   an exact partial final callback, then quiesces transport and the writer.
+   Finalization validates onset, bounded clock drift, stream errors, xruns,
+   route changes, and overflow.
+7. The app uploads the aligned WAV and `durationMs`; the backend derives exact
+   `startTimeMs` from the persisted chain. The cache keeps the real extension.
 
-### Audio Recording ✅ Implemented
+## Android engine
 
-**AudioRecorder class** (`services/audioService.ts`):
-- Handles audio recording permissions and initialization
-- Records audio using expo-av with platform-specific configurations
-- Uploads recordings to S3 via presigned URLs
-- Manages recording lifecycle and cleanup
+Android uses Oboe `FullDuplexStream`:
 
-Key methods:
-- `init()` - Request permissions and configure audio mode
-- `startRecording()` / `stopRecording()` - Control recording
-- `uploadRecording(uri, apiUrl)` - Upload to S3
-- `cleanup()` - Release audio resources
+- output is opened first at the native device rate;
+- input matches the granted output rate and uses the full-duplex buffering
+  helper;
+- compressed source channels are mixed to mono and resampled during load;
+- exact partial-buffer capture handles a punch inside a callback;
+- the callback mixes float PCM and writes capture samples to a preallocated
+  lock-free SPSC ring;
+- a background thread performs file I/O;
+- finalization corrects input/output clock-rate drift against the output
+  timeline and exposes sample rate, xruns, latency estimates, frame counts,
+  overflow, and stream error diagnostics.
+- a take is rejected when a short input read slips the compensated punch, when
+  accumulated drift exceeds the explicit correction bound, or when an overdub
+  route cannot report xrun diagnostics;
+- compensated stop emits silence while capture drains to the exact logical end,
+  so latency trimming does not remove the take's final frames;
+- device topology changes invalidate the engine instead of reopening streams
+  underneath tracks decoded at the previous route rate.
 
-Platform support:
-- iOS: `.m4a` (MPEG4AAC format)
-- Android: `.webm` (WEBM format)
-- Web: `.webm` (128kbps)
+## iOS engine
 
-### Duet Playback ✅ Implemented
+iOS uses a RemoteIO AudioUnit in a play-and-record `AVAudioSession`:
 
-**DuetPlayer class** (`services/duetPlayer.ts`):
-- Chains audio segments for sequential playback
-- Supports playing from any position in the audio chain
-- Manages multiple Audio.Sound instances
-- Calculates cumulative timing for segments
+- input and output are presented through the same aggregated render cycle;
+- the actual active-session sample rate is used;
+- `AVAudioConverter` normalizes loaded assets;
+- reported input plus output latency moves the capture gate while preserving
+  the logical placement frame;
+- capture-only sessions use input latency without adding an irrelevant output
+  delay;
+- the render callback uses the same real-time-safe ring/writer separation and
+  exact partial-buffer punch behavior as Android;
+- a deliberate signed fine-tune may adjust automatic route compensation. The
+  correlation endpoint is reserved for a future guided,
+  known-signal workflow rather than arbitrary story tracks.
 
-Key methods:
-- `loadChain(chain)` - Load audio node chain
-- `playFrom(position)` - Start playback from specific time
-- `getCurrentPosition()` - Track playback position
-- `getRecordingStartPoint()` - Determine where next recording should start
+The Swift bridge, Objective-C export, and Objective-C++ engine must all remain
+members of the Xcode application target.
 
-### Recording Abstraction (Planned)
+## Timeline and cache
 
-The mobile app will use an interface pattern for audio recording to enable future native module integration. This will allow swapping between:
-- **expo-av** (current) - Expo's managed audio implementation
-- **Native modules** (future) - Custom Swift/Kotlin implementations for better performance
+The API/shared contract uses integer milliseconds. Player/UI components convert
+to seconds only at their existing display boundary. `getNextTimelineStartTimeMs`
+is the only scheduling rule.
 
-## Planned Features
+Audio cache paths preserve the actual `.wav`, `.m4a`, or `.webm` container.
+Downloads use a `.download` temporary file and an atomic move so interrupted
+files are never considered playable.
 
-### Story Navigation
-- Browse existing story nodes
-- View story tree structure
-- Select nodes for playback or reply
+## Development and tests
 
-### Audio Recording
-- Record new audio clips
-- Visual feedback during recording
-- Pause/resume functionality
-
-### Audio Playback
-- Play back mixed audio from any node
-- Progress indicator
-- Playback controls (play/pause/seek)
-
-### Story Branching
-- Select a node to reply to
-- View all replies to a node
-- Navigate the branching structure
-
-## Development
+From the repository root:
 
 ```bash
-npm run start            # Start Expo dev server
-npm run ios             # Run on iOS simulator
-npm run android         # Run on Android emulator
-npm run test            # Run tests
-npm run check           # TypeScript checking
+npm run start
+npm run android
+npm run ios
+npm run test
+npm run check
 ```
 
-## Configuration
-
-App configuration in `app.json`:
-
-```json
-{
-  "expo": {
-    "name": "Tap Story",
-    "slug": "tap-story",
-    "version": "0.1.0",
-    "ios": {
-      "bundleIdentifier": "com.tapstory.app"
-    },
-    "android": {
-      "package": "com.tapstory.app"
-    }
-  }
-}
-```
-
-## API Integration
-
-The mobile app communicates with the backend via REST API:
-
-```typescript
-// services/api.ts (planned)
-const api = {
-  startStory: () => POST /api/start
-  replyToNode: (parentId, audio) => POST /api/reply
-  getNode: (nodeId) => GET /api/node/:id
-  getChildren: (nodeId) => GET /api/node/:id/children
-}
-```
-
-## State Management
-
-(To be determined - likely React Context or Zustand for simple state needs)
-
-## Testing
-
-Tests will be written using:
-- Jest + jest-expo
-- React Native Testing Library (when UI components are built)
-
-Current test coverage:
-- Basic app renders without crashing
-
-## Future Considerations
-
-### Native Modules
-When performance requires it, swap expo-av for custom native audio modules:
-- Lower latency recording
-- Better audio quality control
-- Advanced processing features
-
-The AudioRecorderInterface abstraction is already in place to make this migration seamless.
-
-### Offline Support
-- Cache audio nodes locally
-- Queue uploads when offline
-- Sync when connection restored
-
-### Real-time Features
-- Live collaboration indicators
-- Push notifications for new branches
-- Real-time story updates
+Mobile Jest covers Expo lifecycle, playback loading, native session lifecycle,
+upload metadata, and format-safe caching. Portable C++ host tests under
+`mobile/android/app/src/testNative` cover the punch boundary and SPSC ring.
+Native builds validate compilation; physical hardware is still required for
+the acoustic acceptance matrix in
+[`plans/2026-07-12-reliable-audio-sync.md`](./plans/2026-07-12-reliable-audio-sync.md).

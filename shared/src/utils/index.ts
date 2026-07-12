@@ -2,3 +2,4 @@
 export * from './audioValidation';
 export * from './audioFormats';
 export * from './urlGenerator';
+export * from './audioTimeline';

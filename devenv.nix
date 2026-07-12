@@ -24,6 +24,9 @@
 
   services.postgres = {
     enable = true;
+    # Avoid colliding with other devenv projects that use PostgreSQL's
+    # conventional local port.
+    port = 55432;
     listen_addresses = "*";
     initialDatabases = [
       {
@@ -48,7 +51,7 @@
   };
 
   # Test database URL (production and dev URLs are in backend/.env)
-  env.DATABASE_URL_TEST = "postgresql://tapstory_user:tapstory_password@localhost:5432/tapstory_test";
+  env.DATABASE_URL_TEST = "postgresql://tapstory_user:tapstory_password@localhost:55432/tapstory_test";
 
   scripts.setup.exec = ''
     echo "📦 Installing deps and generating Prisma client..."

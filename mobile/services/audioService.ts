@@ -1,5 +1,4 @@
 import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
-import { Platform } from 'react-native';
 import { getApiUrl } from '../utils/api';
 import { isNativeModuleAvailable, TapStoryAudioEngine, type RecordingResult as NativeRecordingResult } from './audio/TapStoryAudio';
 
@@ -26,6 +25,32 @@ const RECORDING_OPTIONS = {
     bitsPerSecond: 128000,
   },
 };
+
+interface RecordingUploadMetadata {
+  filename: string;
+  contentType: string;
+}
+
+export interface RecordedAudioFile {
+  uri: string;
+  durationMs: number;
+}
+
+export function getRecordingUploadMetadata(uri: string): RecordingUploadMetadata {
+  const path = uri.toLowerCase().split(/[?#]/, 1)[0];
+
+  if (path.endsWith('.wav')) {
+    return { filename: 'recording.wav', contentType: 'audio/wav' };
+  }
+  if (path.endsWith('.m4a') || path.endsWith('.mp4')) {
+    return { filename: 'recording.m4a', contentType: 'audio/mp4' };
+  }
+  if (path.endsWith('.aac')) {
+    return { filename: 'recording.aac', contentType: 'audio/aac' };
+  }
+
+  return { filename: 'recording.webm', contentType: 'audio/webm' };
+}
 
 export class AudioRecorder {
   private recording: Audio.Recording | null = null;
@@ -167,21 +192,27 @@ export class AudioRecorder {
     }
   }
 
-  async stopRecording(): Promise<string> {
+  async stopRecording(): Promise<RecordedAudioFile> {
     if (!this.recording) {
       throw new Error('No recording in progress');
     }
 
     try {
-      await this.recording.stopAndUnloadAsync();
+      const status = await this.recording.stopAndUnloadAsync();
       const uri = this.recording.getURI();
       this.recording = null;
 
       if (!uri) {
         throw new Error('Failed to get recording URI');
       }
+      if (!Number.isFinite(status.durationMillis) || status.durationMillis <= 0) {
+        throw new Error('Recording did not contain a measurable audio duration');
+      }
 
-      return uri;
+      return {
+        uri,
+        durationMs: Math.max(1, Math.round(status.durationMillis)),
+      };
     } catch (error) {
       console.error('Failed to stop recording:', error);
       throw error;
@@ -192,25 +223,7 @@ export class AudioRecorder {
     try {
       const apiUrl = getApiUrl();
 
-      // Determine file extension and content type based on file extension or platform
-      // Native audio module produces WAV files, expo-av produces m4a/webm
-      let filename: string;
-      let contentType: string;
-      
-      if (uri.endsWith('.wav')) {
-        // Native recording (WAV format)
-        filename = 'recording.wav';
-        contentType = 'audio/wav';
-        console.log('[AudioRecorder] Uploading native WAV recording');
-      } else if (Platform.OS === 'ios') {
-        // iOS expo-av recording
-        filename = 'recording.m4a';
-        contentType = 'audio/mp4';
-      } else {
-        // Android expo-av recording
-        filename = 'recording.webm';
-        contentType = 'audio/webm';
-      }
+      const { filename, contentType } = getRecordingUploadMetadata(uri);
 
       // Get presigned URL
       const uploadUrlResponse = await fetch(`${apiUrl}/api/audio/upload-url`, {

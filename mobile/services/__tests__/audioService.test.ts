@@ -1,38 +1,37 @@
-// Mock expo-av module
-jest.mock('expo-av', () => ({
-  Audio: {
-    requestPermissionsAsync: jest.fn().mockResolvedValue({ status: 'granted' }),
-    setAudioModeAsync: jest.fn().mockResolvedValue(undefined),
-    Recording: jest.fn().mockImplementation(() => ({
-      prepareToRecordAsync: jest.fn().mockResolvedValue(undefined),
-      startAsync: jest.fn().mockResolvedValue(undefined),
-      stopAndUnloadAsync: jest.fn().mockResolvedValue(undefined),
-      getURI: jest.fn().mockReturnValue('file:///test/recording.webm'),
-    })),
-    AndroidOutputFormat: { WEBM: 1 },
-    AndroidAudioEncoder: { DEFAULT: 0 },
-    IOSOutputFormat: { MPEG4AAC: 1 },
-    IOSAudioQuality: { HIGH: 127 },
-  },
-}));
+import { Audio, InterruptionModeAndroid, InterruptionModeIOS } from 'expo-av';
+import { AudioRecorder, getRecordingUploadMetadata } from '../audioService';
 
-// Mock expo-file-system
-jest.mock('expo-file-system', () => ({
-  getInfoAsync: jest.fn().mockResolvedValue({ exists: true, size: 1024 }),
-}));
-
-import { AudioRecorder } from '../audioService';
+describe('getRecordingUploadMetadata', () => {
+  it.each([
+    ['file:///recording.wav', { filename: 'recording.wav', contentType: 'audio/wav' }],
+    ['file:///recording.m4a', { filename: 'recording.m4a', contentType: 'audio/mp4' }],
+    ['file:///recording.webm', { filename: 'recording.webm', contentType: 'audio/webm' }],
+  ])('uses the real container for %s', (uri, expected) => {
+    expect(getRecordingUploadMetadata(uri)).toEqual(expected);
+  });
+});
 
 describe('AudioRecorder', () => {
   let recorder: AudioRecorder;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     recorder = new AudioRecorder();
   });
 
-  it('should initialize recording', async () => {
+  it('should initialize recording with simultaneous playback configuration', async () => {
     await recorder.init();
+
     expect(recorder.isReady()).toBe(true);
+    expect(Audio.setAudioModeAsync).toHaveBeenCalledWith({
+      allowsRecordingIOS: true,
+      playsInSilentModeIOS: true,
+      staysActiveInBackground: true,
+      interruptionModeIOS: InterruptionModeIOS.DoNotMix,
+      interruptionModeAndroid: InterruptionModeAndroid.DoNotMix,
+      shouldDuckAndroid: true,
+      playThroughEarpieceAndroid: false,
+    });
   });
 
   it('should start and stop recording', async () => {
@@ -42,8 +41,11 @@ describe('AudioRecorder', () => {
     expect(typeof startTimestamp).toBe('number');
     expect(startTimestamp).toBeGreaterThan(0);
 
-    const uri = await recorder.stopRecording();
-    expect(uri).toBeTruthy();
+    const result = await recorder.stopRecording();
+    expect(result).toEqual({
+      uri: 'file:///test/recording.m4a',
+      durationMs: 1_234,
+    });
     expect(recorder.isRecording()).toBe(false);
   });
 

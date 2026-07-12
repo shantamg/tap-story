@@ -2,7 +2,7 @@
  * TapStoryAudio - TypeScript wrapper for the native synchronized audio module
  * 
  * This module provides a clean API for synchronized audio playback and recording
- * using native modules (Android: AudioTrack/AudioRecord, iOS: AVAudioEngine).
+ * using native modules (Android: Oboe, iOS: RemoteIO AudioUnit).
  * 
  * Key features:
  * - Frame-accurate synchronization between playback and recording
@@ -314,4 +314,3 @@ export default {
   cleanup,
   TapStoryAudioEngine,
 };
-

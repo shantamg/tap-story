@@ -9,7 +9,8 @@ async function main() {
   const rootNode = await prisma.audioNode.create({
     data: {
       audioUrl: 'https://example.com/audio/root.mp3',
-      duration: 30,
+      durationMs: 30_000,
+      startTimeMs: 0,
     },
   });
 
@@ -20,7 +21,8 @@ async function main() {
     data: {
       audioUrl: 'https://example.com/audio/child.mp3',
       parentId: rootNode.id,
-      duration: 45,
+      durationMs: 45_000,
+      startTimeMs: 0,
     },
   });
 

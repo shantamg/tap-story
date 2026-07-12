@@ -15,7 +15,7 @@ export function LatencyNudge({ offsetMs, onOffsetChange, disabled = false }: Lat
 
   return (
     <View style={styles.container}>
-      <Text style={styles.label}>Sync Adjust</Text>
+      <Text style={styles.label}>Auto Sync Fine-Tune</Text>
       <View style={styles.controls}>
         <TouchableOpacity 
           style={[styles.button, styles.bigButton]} 
@@ -35,7 +35,9 @@ export function LatencyNudge({ offsetMs, onOffsetChange, disabled = false }: Lat
 
         <View style={styles.display}>
           <Text style={styles.valueText}>
-            {offsetMs > 0 ? '+' : ''}{offsetMs} ms
+            {offsetMs === 0
+              ? 'Auto'
+              : `Auto ${offsetMs > 0 ? '+' : ''}${offsetMs} ms`}
           </Text>
         </View>
 
@@ -108,4 +110,3 @@ const styles = StyleSheet.create({
     fontVariant: ['tabular-nums'],
   },
 });
-

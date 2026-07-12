@@ -1,92 +1,114 @@
 # System Architecture
 
-> **Note:** This document will be expanded as the system is built. Currently describes planned architecture based on project structure.
+## Product goal
 
-## Overview
+Tap Story is a collaborative audio-storytelling app built around an immutable
+chain of isolated recordings. A participant hears the existing story and adds a
+new performance without destructively modifying earlier stems. A node may have
+multiple children, so the same story can branch into alternate continuations.
 
-Tap Story is a collaborative audio storytelling platform built as a TypeScript monorepo with a React Native mobile app and Express.js backend API.
+The current interaction is an alternating two-track timeline:
 
-## Core Components
+1. recordings A and B begin at timeline zero;
+2. recording C begins when A ends;
+3. recording D begins when B ends;
+4. later recordings continue the same two-lane rule.
 
-### Backend API
+Reliable overdub alignment is a core product requirement, not a cosmetic
+enhancement. Built-in and wired routes target perceptual alignment within
+5–10 ms. See [Audio synchronization](./AUDIO_SYNC_ISSUE.md) and the
+[device acceptance plan](./plans/2026-07-12-reliable-audio-sync.md).
 
-Express.js server providing REST endpoints for:
-- Audio node creation and retrieval
-- Audio file processing and mixing
-- Storage management (S3/R2)
+## Repository layout
 
-**Technology Stack:**
-- Express.js (API server)
-- Prisma + PostgreSQL (data layer)
-- FFmpeg (audio processing)
-- AWS S3 / Cloudflare R2 (audio storage)
+Tap Story is a TypeScript npm-workspace monorepo:
 
-See [Backend Architecture](./backend.md) for details.
+- `mobile/` — React Native 0.81 / Expo 54 app plus native Android and iOS audio
+  engines;
+- `backend/` — Express API, Prisma/PostgreSQL persistence, S3 presigned URLs,
+  and audio calibration analysis;
+- `shared/` — API contracts, audio-node types, validation, and the canonical
+  timeline calculator.
 
-### Mobile App
+## Data model
 
-React Native + Expo application for iOS and Android providing:
-- Audio recording interface
-- Audio playback controls
-- Story navigation and branching
-
-**Technology Stack:**
-- React Native + Expo
-- Expo Router (navigation)
-- expo-av (audio recording/playback)
-
-See [Mobile App Documentation](./mobile.md) for details.
-
-### Shared Package
-
-TypeScript library providing type safety across frontend and backend:
-- Audio types (AudioNode, AudioMetadata, etc.)
-- API request/response types
-- Validation utilities
-- Format conversion helpers
-
-## Data Model
-
-### AudioNode
-
-The core data structure representing a single audio recording in the story tree:
+Each `AudioNode` is one isolated stem in a parent/child tree:
 
 ```typescript
-{
-  id: string;           // UUID
-  audioUrl: string;     // S3/R2 URL
-  parentId: string?;    // Reference to parent node
-  duration: number;     // Seconds
-  createdAt: Date;
-  updatedAt: Date;
+interface AudioNode {
+  id: string;
+  audioUrl: string;
+  parentId: string | null;
+  durationMs: number;
+  startTimeMs: number;
+  createdAt: string;
+  updatedAt: string;
 }
 ```
 
-Audio nodes form a tree structure where each node can have multiple children (branches in the story).
+`durationMs` and `startTimeMs` are authoritative integer timeline metadata.
+They are never reconstructed from rounded seconds after a node is saved. The
+client sends duration and parent identity; the backend derives `startTimeMs`
+from the persisted chain. The shared `getNextTimelineStartTimeMs` function
+previews the same rule: the first two start at zero and every later node starts
+at the end of the node two positions back.
 
-## Key Workflows
+## Audio and persistence flow
 
-### Starting a New Story
+```mermaid
+flowchart LR
+    UI["React Native recorder UI"] --> NS["Native duplex session"]
+    NS --> WAV["Aligned mono WAV stem"]
+    WAV --> S3["Direct S3 upload"]
+    UI --> API["Express audio API"]
+    API --> DB[("PostgreSQL AudioNode")]
+    API --> URL["Presigned S3 download URL"]
+    URL --> Cache["Format-safe local cache"]
+    Cache --> NS
+```
 
-1. Mobile app requests new story start
-2. Backend creates root AudioNode
-3. Mobile uploads audio to storage
-4. Backend updates AudioNode with final URL
+The mobile app keeps stems separate and mixes them during native playback. The
+backend does not currently bounce a parent and child into one destructive mix.
+Server-side derived mixes remain a possible delivery optimization, but the
+isolated recordings and exact timeline metadata are the source of truth.
 
-### Replying to a Story
+## Native synchronization architecture
 
-1. Mobile app selects parent node
-2. Mobile records new audio
-3. Backend mixes parent audio + new audio
-4. Backend creates new AudioNode with mixed audio
-5. Returns mixed audio URL to mobile
+- Android uses Oboe `FullDuplexStream` with the device-negotiated sample rate.
+- iOS uses a RemoteIO AudioUnit with an aggregated play-and-record session.
+- Existing assets are decoded, mixed to mono, and resampled before playback.
+- Capture is armed at a logical punch point and gated using route round-trip
+  compensation. The saved stem is placed at the logical point.
+- The real-time callback only mixes and moves PCM through a preallocated SPSC
+  ring. A background thread writes the raw capture.
+- Transport stop is a callback handshake. The first callback that mutes output
+  defines the end, and capture continues through the exact latency tail before
+  the realtime stream is quiesced. Finalization then drains and validates the
+  preserved writer state. Overflowed or discontinuous takes fail rather than
+  silently losing frames.
+- Bluetooth-class routes are rejected for synchronized overdubs because their
+  latency is large and variable.
+- Device changes, interruptions, and iOS media-service resets invalidate the
+  engine and active take; reinitialization reloads tracks at the new route rate.
 
-## Future Architecture Considerations
+Expo AV remains a fallback for first-take recording and playback when the native
+module is unavailable. It is not treated as a reliable overdub engine.
 
-The current architecture is designed for easy migration to serverless infrastructure:
+## Backend responsibilities
 
-- **Audio processing** → AWS Lambda (audioProcessor.ts is already isolated)
-- **Database** → DynamoDB (data access can be abstracted)
-- **Mobile recording** → Native modules (AudioRecorderInterface abstraction ready)
+The backend provides:
 
-See [Infrastructure Documentation](./infrastructure.md) for deployment architecture.
+- presigned S3 upload/download URLs;
+- exact audio-node metadata persistence;
+- ancestor-chain and leaf-chain queries;
+- branch deletion from S3 and PostgreSQL;
+- guided latency analysis using normalized cross-correlation.
+
+See [Backend architecture](./backend.md).
+
+## Verification boundary
+
+Frame math, lifecycle, decoding, cache paths, and correlation are covered by
+automated tests. Acoustic round-trip behavior cannot be proven on a simulator.
+Physical-device loopback acceptance is still required before a release is
+described as meeting the 5–10 ms target.

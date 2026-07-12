@@ -17,7 +17,8 @@ export interface ReplyRequest {
 export interface ReplyResponse {
   nodeId: string;
   audioUrl: string;
-  duration: number;
+  durationMs: number;
+  startTimeMs: number;
 }
 
 export interface GetNodeRequest {
@@ -28,7 +29,8 @@ export interface GetNodeResponse {
   id: string;
   audioUrl: string;
   parentId: string | null;
-  duration: number;
+  durationMs: number;
+  startTimeMs: number;
   createdAt: string;
 }
 

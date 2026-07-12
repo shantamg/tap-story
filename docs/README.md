@@ -11,6 +11,7 @@ This directory contains all project documentation for Tap Story.
 These documents describe the **current** implementation and architecture:
 
 - **[architecture.md](./architecture.md)** - System architecture, components, and data flows
+- **[AUDIO_SYNC_ISSUE.md](./AUDIO_SYNC_ISSUE.md)** - Current synchronization design and verification status
 - **[backend.md](./backend.md)** - Backend API implementation and structure
 - **[mobile.md](./mobile.md)** - Mobile app architecture and features
 - **[infrastructure.md](./infrastructure.md)** - Deployment and hosting setup
@@ -35,6 +36,7 @@ The `plans/` subdirectory contains:
 These documents are forward-looking and describe what will be built.
 
 **Current plans:**
+- [2026-07-12-reliable-audio-sync.md](./plans/2026-07-12-reliable-audio-sync.md) - Reliable duplex audio design and physical-device acceptance
 - [2024-11-23-project-structure-plan.md](./plans/2024-11-23-project-structure-plan.md) - Initial project structure
 - [PROOF_OF_CONCEPT.md](./plans/PROOF_OF_CONCEPT.md) - POC implementation plan
 - [INITIAL_OVERALL_PLAN.md](./plans/INITIAL_OVERALL_PLAN.md) - Overall project vision

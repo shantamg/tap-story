@@ -15,14 +15,9 @@
     "web": "expo start --web",
     "lint": "expo lint",
     "build": "tsc --noEmit",
-    "test": "jest --passWithNoTests",
+    "test": "jest --config jest.config.js --passWithNoTests && ./android/app/src/testNative/run-host-tests.sh",
+    "test:watch": "jest --config jest.config.js --watch",
     "check": "tsc --noEmit"
-  },
-  "jest": {
-    "preset": "jest-expo",
-    "transformIgnorePatterns": [
-      "node_modules/(?!(expo-modules-core|expo-asset|expo-router|@react-native|react-native|@expo|expo|@unimodules|unimodules|native-base|react-navigation|@react-navigation|@react-native-async-storage|react-native-gesture-handler|react-native-reanimated|react-native-screens|react-native-safe-area-context|expo-file-system|expo-constants|expo-linking|expo-font|expo-splash-screen|expo-status-bar|expo-system-ui|@expo/vector-icons)/)"
-    ]
   },
   "dependencies": {
     "@expo/config-plugins": "~54.0.1",

@@ -4,13 +4,14 @@ export interface AudioNode {
   id: string;
   audioUrl: string;
   parentId: string | null;
-  duration: number;
+  durationMs: number;
+  startTimeMs: number;
   createdAt: string;
   updatedAt: string;
 }
 
 export interface AudioMetadata {
-  duration: number;
+  durationMs: number;
   sampleRate: number;
   channels: number;
   format: AudioFormat;
@@ -31,7 +32,7 @@ export interface ValidationResult {
 export interface RecordingStatus {
   isRecording: boolean;
   isPaused: boolean;
-  duration: number;
+  durationMs: number;
 }
 
 export interface UploadUrlResponse {
@@ -41,6 +42,21 @@ export interface UploadUrlResponse {
 
 export interface SaveAudioRequest {
   key: string;
-  duration: number;
+  durationMs: number;
   parentId: string | null;
+}
+
+export interface AudioChainSegment {
+  id: string;
+  durationMs: number;
+  startTimeMs: number;
+  parentId: string | null;
+}
+
+export interface AudioChainSummary {
+  id: string;
+  chainLength: number;
+  totalDurationMs: number;
+  createdAt: string;
+  segments: AudioChainSegment[];
 }

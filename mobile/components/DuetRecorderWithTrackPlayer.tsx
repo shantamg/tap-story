@@ -15,27 +15,22 @@ import { getApiUrl } from '../utils/api';
 import { saveRecordingLocally, saveLatencyOffset, getLatencyOffset, localAudioExists, downloadAndCacheAudio } from '../services/audioStorage';
 import { colors } from '../utils/theme';
 import { LatencyNudge } from './LatencyNudge';
+import type {
+  AudioChainSummary,
+  AudioNode,
+  SaveAudioRequest,
+} from '@shared/types/audio';
+import { getNextTimelineStartTimeMs } from '@shared/utils/audioTimeline';
+import { createPendingAudioSegment } from '../services/audio/pendingAudioSegment';
+import { isAudioInteractionLocked } from './audioInteractionState';
 
 // Type for player that works with both DuetTrackPlayer and NativeDuetPlayer
 type DuetPlayerType = DuetTrackPlayer | NativeDuetPlayer;
 
 interface AudioChainNode extends DuetSegment {
   parentId: string | null;
-}
-
-interface ChainSegment {
-  id: string;
-  duration: number;
-  startTime: number;
-  parentId: string | null;
-}
-
-interface ChainSummary {
-  id: string;
-  chainLength: number;
-  totalDuration: number;
-  createdAt: string;
-  segments: ChainSegment[];
+  durationMs: number;
+  startTimeMs: number;
 }
 
 export function DuetRecorderWithTrackPlayer() {
@@ -43,6 +38,7 @@ export function DuetRecorderWithTrackPlayer() {
   const [isWaitingToRecord, setIsWaitingToRecord] = useState(false);
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [audioError, setAudioError] = useState<string | null>(null);
   const [audioChain, setAudioChain] = useState<AudioChainNode[]>([]);
   const [currentNodeId, setCurrentNodeId] = useState<string | null>(null);
   const [currentPosition, setCurrentPosition] = useState(0);
@@ -51,22 +47,27 @@ export function DuetRecorderWithTrackPlayer() {
   const [seekPreviewPosition, setSeekPreviewPosition] = useState<number | null>(null);
   const [processingSegmentIds, setProcessingSegmentIds] = useState<Set<string>>(new Set());  // Segments being uploaded/processed
   const [latencyOffsetMs, setLatencyOffsetMs] = useState(0);
-  const [isCalibratingLatency, setIsCalibratingLatency] = useState(false);
 
   // Download state
   const [downloadingSegmentIds, setDownloadingSegmentIds] = useState<Set<string>>(new Set());
   const [isDownloadingAudio, setIsDownloadingAudio] = useState(false);
 
   // Saved chains state
-  const [savedChains, setSavedChains] = useState<ChainSummary[]>([]);
+  const [savedChains, setSavedChains] = useState<AudioChainSummary[]>([]);
   const [isLoadingChains, setIsLoadingChains] = useState(false);
 
   // View state
   const [viewMode, setViewMode] = useState<'list' | 'detail'>('list');
 
   // Derived state for control disabling
-  const hasDownloadingSegments = downloadingSegmentIds.size > 0;
-  const canPlayOrRecord = !isDownloadingAudio && !hasDownloadingSegments && !isLoading;
+  const audioInteractionLocked = isAudioInteractionLocked({
+    isLoading,
+    isDownloadingAudio,
+    downloadingSegmentCount: downloadingSegmentIds.size,
+    processingSegmentCount: processingSegmentIds.size,
+    isRecording,
+    isWaitingToRecord,
+  });
 
   // Track if using native audio (for UI feedback)
   const [usingNativeAudio, setUsingNativeAudio] = useState(false);
@@ -121,19 +122,19 @@ export function DuetRecorderWithTrackPlayer() {
 
   async function initAudio() {
     try {
-      // Initialize recorder (only needed if not using native audio for recording)
-      if (!isUsingNativeRef.current) {
-        await recorder.current.init();
-      }
+      // AudioRecorder owns the runtime microphone permission request. Native
+      // engines still need that permission even though they do the capture.
+      await recorder.current.init();
       // Initialize the player (either native or expo-av based)
       await player.current.initialize();
       setUsingNativeAudio(isUsingNativeRef.current);
       
       if (isUsingNativeRef.current) {
-        console.log('[DuetRecorderWithTrackPlayer] Native audio initialized - perfect sync enabled');
+        console.log('[DuetRecorderWithTrackPlayer] Native synchronized audio engine initialized');
       }
     } catch (error) {
       console.error('[DuetRecorderWithTrackPlayer] Failed to initialize audio:', error);
+      setAudioError(error instanceof Error ? error.message : 'Failed to initialize audio');
     }
   }
 
@@ -143,50 +144,9 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function handleLatencyChange(newOffset: number) {
-    setLatencyOffsetMs(newOffset);
-    await saveLatencyOffset(newOffset);
-  }
-
-  async function calibrateLatencyFromLastTwo() {
-    if (audioChain.length < 2) {
-      console.warn('[DuetRecorderWithTrackPlayer] Not enough segments to calibrate latency');
-      return;
-    }
-
-    const referenceNodeId = audioChain[audioChain.length - 2].id;
-    const testNodeId = audioChain[audioChain.length - 1].id;
-
-    try {
-      setIsCalibratingLatency(true);
-      console.log('[DuetRecorderWithTrackPlayer] Calibrating latency from nodes:', referenceNodeId, testNodeId);
-
-      const response = await fetch(`${getApiUrl()}/api/audio/calibrate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ referenceNodeId, testNodeId }),
-      });
-
-      if (!response.ok) {
-        const text = await response.text();
-        console.error('[DuetRecorderWithTrackPlayer] Latency calibration failed:', response.status, text);
-        throw new Error('Latency calibration failed');
-      }
-
-      const data = await response.json() as { offsetMs?: number };
-      if (typeof data.offsetMs !== 'number' || Number.isNaN(data.offsetMs)) {
-        console.error('[DuetRecorderWithTrackPlayer] Invalid offsetMs from calibration:', data);
-        throw new Error('Invalid calibration result');
-      }
-
-      const newOffset = Math.round(data.offsetMs);
-      console.log('[DuetRecorderWithTrackPlayer] Calibration result offsetMs:', newOffset);
-      setLatencyOffsetMs(newOffset);
-      await saveLatencyOffset(newOffset);
-    } catch (error) {
-      console.error('[DuetRecorderWithTrackPlayer] Error during latency calibration:', error);
-    } finally {
-      setIsCalibratingLatency(false);
-    }
+    const clampedOffset = Math.max(-250, Math.min(250, newOffset));
+    setLatencyOffsetMs(clampedOffset);
+    await saveLatencyOffset(clampedOffset);
   }
 
   const fetchSavedChains = useCallback(async () => {
@@ -196,7 +156,7 @@ export function DuetRecorderWithTrackPlayer() {
       if (!response.ok) {
         throw new Error('Failed to fetch chains');
       }
-      const data = await response.json();
+      const data = await response.json() as { chains: AudioChainSummary[] };
       setSavedChains(data.chains);
     } catch (error) {
       console.error('[DuetRecorder] Failed to fetch chains:', error);
@@ -210,26 +170,8 @@ export function DuetRecorderWithTrackPlayer() {
       setIsLoading(true);
       console.log('[DuetRecorderWithTrackPlayer] Deleting chain:', chainId);
 
-      // First, get all nodes in the chain to delete local files
-      const treeResponse = await fetch(`${getApiUrl()}/api/audio/tree/${chainId}`);
-      if (!treeResponse.ok) {
-        throw new Error('Failed to fetch chain tree');
-      }
-      const treeData = await treeResponse.json();
-      const ancestors = treeData.ancestors || [];
-
-      // Delete local files for all nodes in the chain
-      const { deleteLocalAudio } = await import('../services/audioStorage');
-      for (const node of ancestors) {
-        try {
-          await deleteLocalAudio(node.id);
-        } catch (error) {
-          console.error(`[DuetRecorderWithTrackPlayer] Failed to delete local file for ${node.id}:`, error);
-          // Continue even if local delete fails
-        }
-      }
-
-      // Delete from backend (S3 and database)
+      // The backend deletes only the suffix exclusive to this leaf and retains
+      // ancestors shared by sibling stories.
       const deleteResponse = await fetch(`${getApiUrl()}/api/audio/chain/${chainId}`, {
         method: 'DELETE',
       });
@@ -237,6 +179,19 @@ export function DuetRecorderWithTrackPlayer() {
       if (!deleteResponse.ok) {
         throw new Error('Failed to delete chain');
       }
+
+      const result = await deleteResponse.json() as { nodeIds?: string[] };
+      const { deleteLocalAudio } = await import('../services/audioStorage');
+      await Promise.all((result.nodeIds ?? []).map(async nodeId => {
+        try {
+          await deleteLocalAudio(nodeId);
+        } catch (error) {
+          console.error(
+            `[DuetRecorderWithTrackPlayer] Failed to delete local file for ${nodeId}:`,
+            error
+          );
+        }
+      }));
 
       console.log('[DuetRecorderWithTrackPlayer] Chain deleted successfully');
       
@@ -261,28 +216,16 @@ export function DuetRecorderWithTrackPlayer() {
       if (!response.ok) {
         throw new Error('Failed to fetch chain');
       }
-      const data = await response.json();
-      const ancestors: Array<{
-        id: string;
-        audioUrl: string;
-        parentId: string | null;
-        duration: number;
-      }> = data.ancestors;
-
-      // Calculate start times - first two at 0, then alternating tracks
-      const chain: AudioChainNode[] = [];
-      for (let i = 0; i < ancestors.length; i++) {
-        const node = ancestors[i];
-        let startTime = 0;
-
-        if (i >= 2) {
-          // 3rd+ segment starts at end of segment 2 positions back (same track)
-          const sameTrackSegment = chain[i - 2];
-          startTime = sameTrackSegment.startTime + sameTrackSegment.duration;
-        }
-
-        chain.push({ ...node, startTime });
-      }
+      const data = await response.json() as { ancestors: AudioNode[] };
+      const chain: AudioChainNode[] = data.ancestors.map(node => ({
+        id: node.id,
+        audioUrl: node.audioUrl,
+        parentId: node.parentId,
+        durationMs: node.durationMs,
+        startTimeMs: node.startTimeMs,
+        duration: node.durationMs / 1000,
+        startTime: node.startTimeMs / 1000,
+      }));
 
       // Check which segments need downloading
       for (const segment of chain) {
@@ -333,19 +276,13 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   function getNextRecordingStartTime(): number {
-    // First two recordings start at 0 (duet format - both tracks start together)
-    if (audioChain.length < 2) {
-      return 0;
-    }
-    // 3rd+ recording: start at the end of the segment 2 positions back (same track)
-    // Segment 3 starts when segment 1 ends, segment 4 when segment 2 ends, etc.
-    const sameTrackSegment = audioChain[audioChain.length - 2];
-    return sameTrackSegment.startTime + sameTrackSegment.duration;
+    return getNextTimelineStartTimeMs(audioChain) / 1000;
   }
 
   async function startDuetRecording() {
     try {
       setIsLoading(true);
+      setAudioError(null);
       console.log('[DuetRecorder] Starting duet recording, chain length:', audioChain.length);
 
       // Calculate the logical start time (where the new track should begin)
@@ -353,7 +290,17 @@ export function DuetRecorderWithTrackPlayer() {
 
       console.log('[DuetRecorder] Recording will start at:', logicalStartTime);
 
+      if (audioChain.length > 0 && !isUsingNativeRef.current) {
+        throw new Error(
+          'Synchronized overdubs require the Tap Story native audio engine. Open the app in an iOS/Android development build instead of Expo Go.'
+        );
+      }
+
       if (audioChain.length > 0) {
+        if (isUsingNativeRef.current) {
+          await (player.current as NativeDuetPlayer)
+            .configureLatencyCompensation(latencyOffsetMs);
+        }
         await player.current.loadChain(audioChain);
 
         // Only prepare recorder if not using native audio (native handles recording internally)
@@ -443,8 +390,10 @@ export function DuetRecorderWithTrackPlayer() {
       }
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
-      setIsLoading(false);
+      setAudioError(error instanceof Error ? error.message : 'Failed to start recording');
+      setIsRecording(false);
       setIsWaitingToRecord(false);
+      setIsLoading(false);
     }
   }
 
@@ -480,6 +429,9 @@ export function DuetRecorderWithTrackPlayer() {
       }
     } catch (error) {
       console.error('[DuetRecorder] Failed to start recording:', error);
+      setAudioError(error instanceof Error ? error.message : 'Failed to start recording');
+      setIsRecording(false);
+      setIsWaitingToRecord(false);
     } finally {
       setIsLoading(false);
     }
@@ -495,8 +447,8 @@ export function DuetRecorderWithTrackPlayer() {
       }
 
       let tempUri: string;
-      let duration: number;
-      let startTime: number;
+      let durationMs: number;
+      let startTimeMs: number;
 
       if (isUsingNativeRef.current) {
         // Native audio: stop player which also stops recording
@@ -508,19 +460,22 @@ export function DuetRecorderWithTrackPlayer() {
         }
         
         tempUri = result.uri;
-        duration = Math.ceil(result.durationMs / 1000);
-        startTime = result.startTimeMs / 1000;
+        durationMs = Math.max(1, Math.round(result.durationMs));
+        // Persist the canonical story rule, not a millisecond value that has
+        // made a lossy round-trip through device sample frames.
+        startTimeMs = getNextTimelineStartTimeMs(audioChain);
         
         console.log('[DuetRecorder] Native recording stopped:', {
           uri: tempUri,
-          duration,
-          startTime: result.startTimeMs
+          durationMs,
+          startTimeMs,
         });
       } else {
         // Non-native: use AudioRecorder
-        tempUri = await recorder.current.stopRecording();
-        duration = Math.ceil((Date.now() - recordingStartTimestamp.current) / 1000);
-        startTime = recordingStartTime;
+        const recordedFile = await recorder.current.stopRecording();
+        tempUri = recordedFile.uri;
+        durationMs = recordedFile.durationMs;
+        startTimeMs = Math.max(0, Math.round(recordingStartTime * 1000));
         
         if (isPlaying) {
           await player.current.stop();
@@ -532,19 +487,19 @@ export function DuetRecorderWithTrackPlayer() {
       setIsPlaying(false);
       stopPositionTracking();
 
-      console.log('[DuetRecorder] Saving segment - startTime:', startTime, 'duration:', duration);
+      console.log('[DuetRecorder] Saving segment metadata:', { startTimeMs, durationMs });
 
       // Create temporary segment ID for the new recording
       const tempSegmentId = `temp-${Date.now()}`;
       
       // Add segment to chain immediately with temporary data (before upload)
-      const tempNode: AudioChainNode = {
+      const tempNode: AudioChainNode = createPendingAudioSegment({
         id: tempSegmentId,
-        audioUrl: '', // Will be updated after upload
-        duration,
-        startTime,
+        recordingUri: tempUri,
+        durationMs,
+        startTimeMs,
         parentId: currentNodeId,
-      };
+      });
 
       // Add to chain and mark as processing
       const newChain = [...audioChain, tempNode];
@@ -553,9 +508,9 @@ export function DuetRecorderWithTrackPlayer() {
 
       const key = await recorder.current.uploadRecording(tempUri);
 
-      const savePayload = {
+      const savePayload: SaveAudioRequest = {
         key,
-        duration,
+        durationMs,
         parentId: currentNodeId,
       };
 
@@ -569,13 +524,18 @@ export function DuetRecorderWithTrackPlayer() {
         throw new Error('Failed to save audio metadata');
       }
 
-      const savedNode = await saveResponse.json();
+      const savedNode = await saveResponse.json() as AudioNode;
       const localUri = await saveRecordingLocally(tempUri, savedNode.id);
 
       const nodeWithLocalUri: AudioChainNode = {
-        ...savedNode,
+        id: savedNode.id,
+        audioUrl: savedNode.audioUrl,
+        parentId: savedNode.parentId,
+        durationMs: savedNode.durationMs,
+        startTimeMs: savedNode.startTimeMs,
+        duration: savedNode.durationMs / 1000,
+        startTime: savedNode.startTimeMs / 1000,
         localUri,
-        startTime,
       };
 
       // Replace temp node with real node
@@ -594,6 +554,12 @@ export function DuetRecorderWithTrackPlayer() {
       });
     } catch (error) {
       console.error('[DuetRecorderWithTrackPlayer] Recording save error:', error);
+      setAudioError(error instanceof Error ? error.message : 'Failed to finalize recording');
+      setIsRecording(false);
+      setIsWaitingToRecord(false);
+      setIsPlaying(false);
+      setRecordingDuration(0);
+      stopPositionTracking();
       // Remove the temp segment on error
       setAudioChain(prev => prev.filter(node => !node.id.startsWith('temp-')));
       setProcessingSegmentIds(prev => {
@@ -611,6 +577,7 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function handleRecordPress() {
+    if (isLoading || processingSegmentIds.size > 0 || isWaitingToRecord) return;
     if (isRecording) {
       await stopDuetRecording();
     } else {
@@ -645,9 +612,17 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function stopPlayback() {
-    if (isPlaying) {
+    if (!isPlaying && !isWaitingToRecord) return;
+
+    try {
       await player.current.stop();
+    } catch (error) {
+      console.error('[DuetRecorder] Failed to cancel playback session:', error);
+      setAudioError(error instanceof Error ? error.message : 'Failed to stop audio session');
+    } finally {
       setIsPlaying(false);
+      setIsWaitingToRecord(false);
+      setIsRecording(false);
       stopPositionTracking();
       setCurrentPosition(0);
       setSeekPreviewPosition(null);
@@ -655,7 +630,9 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function handleStopButton() {
-    if (isRecording) {
+    if (isWaitingToRecord) {
+      await stopPlayback();
+    } else if (isRecording) {
       await stopDuetRecording();
     } else {
       await stopPlayback();
@@ -663,15 +640,13 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function handleRewind() {
-    if (isRecording) return;
+    if (isRecording || isWaitingToRecord) return;
     await handleSeek(0);
   }
 
   async function handleFastForward() {
-    if (isRecording) return;
-    if (isWaitingToRecord) {
-      await handleSeek(recordingStartTime);
-    } else if (audioChain.length > 0) {
+    if (audioInteractionLocked) return;
+    if (audioChain.length > 0) {
       await player.current.loadChain(audioChain);
       const totalDuration = player.current.getTotalDuration();
       await handleSeek(totalDuration);
@@ -700,7 +675,7 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function playFromPlayhead() {
-    if (audioChain.length === 0) {
+    if (audioInteractionLocked || audioChain.length === 0) {
       return;
     }
 
@@ -713,6 +688,7 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function playFromPosition(startPosition: number) {
+    if (isWaitingToRecord) return;
     try {
       setIsLoading(true);
       await player.current.loadChain(audioChain);
@@ -733,33 +709,23 @@ export function DuetRecorderWithTrackPlayer() {
   }
 
   async function handleSegmentTap(segment: { id: string; startTime: number }) {
-    if (isRecording) return;
+    if (audioInteractionLocked) return;
     await playFromPosition(segment.startTime);
   }
 
   function handleSeekPreview(position: number) {
-    if (isRecording) return;
+    if (audioInteractionLocked) return;
     if (audioChain.length === 0) return;
-
-    if (isWaitingToRecord && position >= recordingStartTime) {
-      position = Math.max(0, recordingStartTime - 0.1);
-    }
 
     setCurrentPosition(position);
     setSeekPreviewPosition(position);
   }
 
   async function handleSeek(position: number) {
-    if (isRecording) return;
+    if (audioInteractionLocked) return;
     if (audioChain.length === 0) return;
 
-    if (isWaitingToRecord && position >= recordingStartTime) {
-      position = Math.max(0, recordingStartTime - 0.1);
-    }
-
     try {
-      await player.current.loadChain(audioChain);
-
       const wasPlaying = isPlaying;
       if (isPlaying) {
         await player.current.stop();
@@ -771,6 +737,7 @@ export function DuetRecorderWithTrackPlayer() {
       setSeekPreviewPosition(null);
 
       if (wasPlaying) {
+        await player.current.loadChain(audioChain);
         if (isWaitingToRecord) {
           setIsPlaying(true);
           await player.current.playFrom(position, recordingStartTime, () => {
@@ -820,7 +787,7 @@ export function DuetRecorderWithTrackPlayer() {
   return (
     <View style={styles.detailContainer}>
       <View style={styles.backButtonContainer}>
-        <Button title="< Back" onPress={goBackToList} disabled={isLoading || isRecording} />
+        <Button title="< Back" onPress={goBackToList} disabled={isLoading || isRecording || isWaitingToRecord} />
       </View>
 
       {/* Timeline */}
@@ -852,8 +819,9 @@ export function DuetRecorderWithTrackPlayer() {
           {audioChain.length} {audioChain.length === 1 ? 'segment' : 'segments'}
         </Text>
         {usingNativeAudio && (
-          <Text style={styles.syncStatus}>⚡ Native Sync Enabled</Text>
+          <Text style={styles.syncStatus}>⚡ Native sync engine</Text>
         )}
+        {audioError && <Text style={styles.errorText}>{audioError}</Text>}
         {isRecording && isPlaying && (
           <Text style={styles.recordingText}>Recording while playing...</Text>
         )}
@@ -878,24 +846,13 @@ export function DuetRecorderWithTrackPlayer() {
         onFastForward={handleFastForward}
       />
 
-      {/* Only show latency controls when not using native audio (native doesn't need manual calibration) */}
-      {!usingNativeAudio && (
+      {/* Zero uses route auto-detection; a measured value overrides it. */}
+      {usingNativeAudio && (
         <LatencyNudge
           offsetMs={latencyOffsetMs}
           onOffsetChange={handleLatencyChange}
-          disabled={isRecording || isPlaying || isCalibratingLatency}
+          disabled={isRecording || isPlaying || isWaitingToRecord}
         />
-      )}
-
-      {/* Only show calibration when not using native audio */}
-      {!usingNativeAudio && audioChain.length >= 2 && (
-        <View style={styles.calibrationContainer}>
-          <Button
-            title={isCalibratingLatency ? 'Calibrating…' : 'Calibrate sync from last 2 tracks'}
-            onPress={calibrateLatencyFromLastTwo}
-            disabled={isRecording || isPlaying || isCalibratingLatency}
-          />
-        </View>
       )}
 
       {/* Hint text */}
@@ -973,15 +930,16 @@ const styles = StyleSheet.create({
     marginTop: 8,
     fontWeight: '600',
   },
+  errorText: {
+    color: colors.recording,
+    marginTop: 8,
+    textAlign: 'center',
+  },
   hint: {
     marginTop: 20,
     color: colors.textSecondary,
     fontSize: 12,
     textAlign: 'center',
     paddingHorizontal: 20,
-  },
-  calibrationContainer: {
-    marginTop: 8,
-    alignItems: 'center',
   },
 });

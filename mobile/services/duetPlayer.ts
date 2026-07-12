@@ -1,5 +1,5 @@
 import { Audio, AVPlaybackStatus } from 'expo-av';
-import { localAudioExists, getLocalAudioPath, downloadAndCacheAudio } from './audioStorage';
+import { findCachedAudioPath, downloadAndCacheAudio } from './audioStorage';
 
 interface AudioSegment {
   id: string;
@@ -173,9 +173,9 @@ export class DuetPlayer {
       return segment.localUri;
     }
 
-    const hasLocal = await localAudioExists(segment.id);
-    if (hasLocal) {
-      return getLocalAudioPath(segment.id);
+    const cachedPath = await findCachedAudioPath(segment.id);
+    if (cachedPath) {
+      return cachedPath;
     }
 
     try {

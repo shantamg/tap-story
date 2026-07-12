@@ -1,10 +1,16 @@
+import { Audio } from 'expo-av';
 import { DuetPlayer } from '../duetPlayer';
 
 describe('DuetPlayer', () => {
   let player: DuetPlayer;
 
   beforeEach(() => {
+    jest.clearAllMocks();
     player = new DuetPlayer();
+  });
+
+  afterEach(async () => {
+    await player.cleanup();
   });
 
   it('should load audio chain with overlapping segments', async () => {
@@ -17,6 +23,7 @@ describe('DuetPlayer', () => {
     await player.loadChain(mockChain);
     // Total duration is max end time = 15
     expect(player.getTotalDuration()).toBe(15);
+    expect(Audio.Sound.createAsync).toHaveBeenCalledTimes(2);
   });
 
   it('should calculate total duration with staggered segments', async () => {

@@ -16,7 +16,8 @@ model AudioNode {
   parentId  String?
   parent    AudioNode? @relation("AudioNodeChildren", fields: [parentId], references: [id])
   children  AudioNode[] @relation("AudioNodeChildren")
-  duration  Int      // Duration in seconds
+  durationMs Int
+  startTimeMs Int
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 

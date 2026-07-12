@@ -6,12 +6,12 @@
  * - Time stretching (speed change without pitch change)
  * - Precise position tracking for recording sync
  * - Configurable latency offset compensation
- * - Native module support for perfect sync (Android: Oboe C++)
+ * - Native duplex support for deterministic frame alignment (Android: Oboe C++)
  */
 import { Audio } from 'expo-av';
 import { Platform, NativeEventEmitter, NativeModules } from 'react-native';
 import { LATENCY_OFFSET_MS } from './trackPlayerSetup';
-import { localAudioExists, getLocalAudioPath, downloadAndCacheAudio } from '../audioStorage';
+import { findCachedAudioPath, downloadAndCacheAudio } from '../audioStorage';
 import { 
   isNativeModuleAvailable, 
   TapStoryAudioEngine,
@@ -178,9 +178,9 @@ export class DuetTrackPlayer {
       return segment.localUri;
     }
 
-    const hasLocal = await localAudioExists(segment.id);
-    if (hasLocal) {
-      return getLocalAudioPath(segment.id);
+    const cachedPath = await findCachedAudioPath(segment.id);
+    if (cachedPath) {
+      return cachedPath;
     }
 
     try {
@@ -650,4 +650,3 @@ export class DuetTrackPlayer {
     return this.nativeEngine;
   }
 }
-

@@ -1,10 +1,116 @@
 import { Router, Request, Response } from 'express';
 import { PrismaClient } from '@prisma/client';
+import type { Prisma } from '@prisma/client';
 import { generateUploadUrl, generateDownloadUrl, deleteAudioFile } from '../services/s3Service';
 import { measureLatencyMsForKeys } from '../utils/latencyCalibration';
+import { getReplyStartTimeMs } from '../utils/audioTimeline';
 
 const router = Router();
 const prisma = new PrismaClient();
+const SERIALIZABLE_TRANSACTION_MAX_ATTEMPTS = 3;
+
+interface SaveAudioPayload {
+  key: string;
+  durationMs: number;
+  parentId: string | null;
+}
+
+interface DeletableAudioNode {
+  id: string;
+  audioUrl: string;
+  parentId: string | null;
+  _count: { children: number };
+}
+
+type DeleteStoryResult =
+  | { status: 'not-found' }
+  | { status: 'not-leaf' }
+  | {
+      status: 'deleted';
+      nodes: Array<{ id: string; audioUrl: string }>;
+      deletedNodes: number;
+    };
+
+type DeleteStoryPlan =
+  | { status: 'not-found' }
+  | { status: 'not-leaf' }
+  | { status: 'ready'; nodes: Array<{ id: string; audioUrl: string }> };
+
+async function findExclusiveStorySuffix(
+  transaction: Prisma.TransactionClient,
+  leafId: string
+): Promise<DeleteStoryPlan> {
+  const nodes: Array<{ id: string; audioUrl: string }> = [];
+  let currentId: string | null = leafId;
+  let isTarget = true;
+
+  while (currentId) {
+    const node: DeletableAudioNode | null = await transaction.audioNode.findUnique({
+      where: { id: currentId },
+      select: {
+        id: true,
+        audioUrl: true,
+        parentId: true,
+        _count: { select: { children: true } },
+      },
+    });
+
+    if (!node) return isTarget ? { status: 'not-found' } : { status: 'ready', nodes };
+    if (isTarget && node._count.children > 0) return { status: 'not-leaf' };
+    if (!isTarget && node._count.children > 1) break;
+
+    nodes.push({ id: node.id, audioUrl: node.audioUrl });
+    currentId = node.parentId;
+    isTarget = false;
+  }
+
+  return { status: 'ready', nodes };
+}
+
+function isSerializableWriteConflict(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    error.code === 'P2034'
+  );
+}
+
+async function deleteLeafStoryOnce(leafId: string): Promise<DeleteStoryResult> {
+  return prisma.$transaction(async transaction => {
+    const plan = await findExclusiveStorySuffix(transaction, leafId);
+    if (plan.status !== 'ready') return plan;
+
+    const nodeIds = plan.nodes.map(node => node.id);
+    const deletion = await transaction.audioNode.deleteMany({
+      where: { id: { in: nodeIds } },
+    });
+    if (deletion.count !== nodeIds.length) {
+      throw new Error(`Deleted ${deletion.count} of ${nodeIds.length} audio nodes`);
+    }
+
+    return {
+      status: 'deleted',
+      nodes: plan.nodes,
+      deletedNodes: deletion.count,
+    };
+  }, { isolationLevel: 'Serializable' });
+}
+
+async function deleteLeafStory(leafId: string): Promise<DeleteStoryResult> {
+  for (let attempt = 1; attempt <= SERIALIZABLE_TRANSACTION_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await deleteLeafStoryOnce(leafId);
+    } catch (error) {
+      const shouldRetry =
+        isSerializableWriteConflict(error) &&
+        attempt < SERIALIZABLE_TRANSACTION_MAX_ATTEMPTS;
+      if (!shouldRetry) throw error;
+    }
+  }
+
+  throw new Error('Serializable transaction retry loop exhausted unexpectedly');
+}
 
 // Get presigned URL for upload
 router.post('/upload-url', async (req: Request, res: Response) => {
@@ -26,16 +132,46 @@ router.post('/upload-url', async (req: Request, res: Response) => {
 // Save audio metadata after successful upload
 router.post('/save', async (req: Request, res: Response) => {
   try {
-    const { key, duration, parentId } = req.body;
+    const { key, durationMs, parentId } = req.body as Partial<SaveAudioPayload>;
 
-    if (!key || duration === undefined) {
-      return res.status(400).json({ error: 'Key and duration required' });
+    if (!key || durationMs === undefined) {
+      return res.status(400).json({ error: 'Key and durationMs required' });
+    }
+
+    if (!Number.isInteger(durationMs) || durationMs <= 0 || durationMs > 2_147_483_647) {
+      return res.status(400).json({
+        error: 'durationMs must be a positive integer',
+      });
+    }
+
+    let startTimeMs = 0;
+    if (parentId) {
+      const parent = await prisma.audioNode.findUnique({
+        where: { id: parentId },
+        select: {
+          id: true,
+          parent: {
+            select: {
+              durationMs: true,
+              startTimeMs: true,
+            },
+          },
+        },
+      });
+      if (!parent) {
+        return res.status(404).json({ error: 'Parent audio node not found' });
+      }
+      startTimeMs = getReplyStartTimeMs(parent.parent);
+      if (!Number.isSafeInteger(startTimeMs) || startTimeMs > 2_147_483_647) {
+        return res.status(400).json({ error: 'Audio timeline exceeds supported duration' });
+      }
     }
 
     const audioNode = await prisma.audioNode.create({
       data: {
         audioUrl: key,
-        duration,
+        durationMs,
+        startTimeMs,
         parentId: parentId || null,
       },
     });
@@ -56,8 +192,13 @@ router.post('/save', async (req: Request, res: Response) => {
 // List all audio chains (leaf nodes - nodes with no children) with segment data for preview
 router.get('/chains', async (req: Request, res: Response) => {
   try {
+    interface ChainLeaf {
+      id: string;
+      createdAt: Date;
+    }
+
     // Find all leaf nodes (nodes that are not a parent of any other node)
-    const leafNodes = await prisma.audioNode.findMany({
+    const leafNodes: ChainLeaf[] = await prisma.audioNode.findMany({
       where: {
         children: {
           none: {},
@@ -72,50 +213,45 @@ router.get('/chains', async (req: Request, res: Response) => {
     const chains = await Promise.all(
       leafNodes.map(async (leaf) => {
         // Traverse to get all ancestors
-        const segments: Array<{ id: string; duration: number; parentId: string | null }> = [];
+        const segments: Array<{
+          id: string;
+          durationMs: number;
+          startTimeMs: number;
+          parentId: string | null;
+        }> = [];
         let currentId: string | null = leaf.id;
 
         while (currentId) {
-          const node: { id: string; duration: number; parentId: string | null } | null = await prisma.audioNode.findUnique({
+          const node: {
+            id: string;
+            durationMs: number;
+            startTimeMs: number;
+            parentId: string | null;
+          } | null = await prisma.audioNode.findUnique({
             where: { id: currentId },
-            select: { id: true, duration: true, parentId: true },
+            select: {
+              id: true,
+              durationMs: true,
+              startTimeMs: true,
+              parentId: true,
+            },
           });
           if (!node) break;
           segments.unshift(node); // Add to front to maintain order (oldest first)
           currentId = node.parentId;
         }
 
-        // Calculate start times for each segment based on duet rules (iterative)
-        const segmentsWithStartTimes: Array<{ id: string; duration: number; parentId: string | null; startTime: number }> = [];
-        for (let index = 0; index < segments.length; index++) {
-          const seg = segments[index];
-          let startTime = 0;
-
-          if (index === 0) {
-            startTime = 0;
-          } else if (index === 1) {
-            startTime = 0; // Second recording duets with first
-          } else {
-            // Find earliest end time among previous segments
-            const endTimes = segmentsWithStartTimes.map(s => s.startTime + s.duration);
-            const sortedEndTimes = [...endTimes].sort((a, b) => a - b);
-            startTime = sortedEndTimes[index - 2]; // Second-to-last end time
-          }
-
-          segmentsWithStartTimes.push({ ...seg, startTime });
-        }
-
         // Calculate total timeline duration
-        const totalDuration = segmentsWithStartTimes.length > 0
-          ? Math.max(...segmentsWithStartTimes.map(s => s.startTime + s.duration))
+        const totalDurationMs = segments.length > 0
+          ? Math.max(...segments.map(segment => segment.startTimeMs + segment.durationMs))
           : 0;
 
         return {
           id: leaf.id,
           chainLength: segments.length,
-          totalDuration,
+          totalDurationMs,
           createdAt: leaf.createdAt,
-          segments: segmentsWithStartTimes,
+          segments,
         };
       })
     );
@@ -137,7 +273,8 @@ router.get('/tree/:id', async (req: Request, res: Response) => {
       id: string;
       audioUrl: string;
       parentId: string | null;
-      duration: number;
+      durationMs: number;
+      startTimeMs: number;
       createdAt: Date;
       updatedAt: Date;
     }
@@ -187,19 +324,25 @@ router.post('/calibrate', async (req: Request, res: Response) => {
 
     const referenceNode = await prisma.audioNode.findUnique({
       where: { id: referenceNodeId },
-      select: { id: true, audioUrl: true },
+      select: { id: true, audioUrl: true, startTimeMs: true },
     });
 
     const testNode = await prisma.audioNode.findUnique({
       where: { id: testNodeId },
-      select: { id: true, audioUrl: true },
+      select: { id: true, audioUrl: true, startTimeMs: true },
     });
 
     if (!referenceNode || !testNode) {
       return res.status(404).json({ error: 'Reference or test node not found' });
     }
 
-    const offsetMs = await measureLatencyMsForKeys(referenceNode.audioUrl, testNode.audioUrl);
+    const localOffsetMs = await measureLatencyMsForKeys(
+      referenceNode.audioUrl,
+      testNode.audioUrl
+    );
+    const offsetMs = localOffsetMs
+      + testNode.startTimeMs
+      - referenceNode.startTimeMs;
 
     res.json({
       referenceNodeId,
@@ -212,31 +355,23 @@ router.post('/calibrate', async (req: Request, res: Response) => {
   }
 });
 
-// Delete a chain (all nodes in the tree) and their S3 files
+// Delete one leaf story. Shared ancestors are retained for sibling branches.
 router.delete('/chain/:id', async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
-
-    // Get all nodes in the chain (tree) by traversing from leaf to root
-    const nodesToDelete: Array<{ id: string; audioUrl: string }> = [];
-    let currentId: string | null = id;
-
-    while (currentId) {
-      const node: { id: string; audioUrl: string; parentId: string | null } | null = await prisma.audioNode.findUnique({
-        where: { id: currentId },
-        select: { id: true, audioUrl: true, parentId: true },
-      });
-
-      if (!node) {
-        break;
-      }
-
-      nodesToDelete.push({ id: node.id, audioUrl: node.audioUrl });
-      currentId = node.parentId;
+    const result = await deleteLeafStory(id);
+    if (result.status === 'not-found') {
+      return res.status(404).json({ error: 'Audio story not found' });
+    }
+    if (result.status === 'not-leaf') {
+      return res.status(409).json({ error: 'Only a leaf story can be deleted' });
     }
 
-    // Delete from S3 first (before database deletion)
-    for (const node of nodesToDelete) {
+    const nodeIds = result.nodes.map(node => node.id);
+
+    // Database consistency is authoritative. Object cleanup follows, and an S3
+    // failure leaves only an orphaned object rather than a broken story branch.
+    for (const node of result.nodes) {
       try {
         await deleteAudioFile(node.audioUrl);
       } catch (s3Error) {
@@ -245,24 +380,10 @@ router.delete('/chain/:id', async (req: Request, res: Response) => {
       }
     }
 
-    // Delete all nodes from database
-    // Delete from leaf to root to avoid foreign key constraint issues
-    // (though with ON DELETE SET NULL, order shouldn't matter, but being safe)
-    for (const node of nodesToDelete) {
-      try {
-        await prisma.audioNode.delete({
-          where: { id: node.id },
-        });
-      } catch (dbError) {
-        console.error(`Failed to delete database node ${node.id}:`, dbError);
-        // Continue even if one delete fails
-      }
-    }
-
     res.json({ 
       success: true, 
-      deletedNodes: nodesToDelete.length,
-      nodeIds: nodesToDelete.map(n => n.id)
+      deletedNodes: result.deletedNodes,
+      nodeIds,
     });
   } catch (error) {
     console.error('Delete chain error:', error);

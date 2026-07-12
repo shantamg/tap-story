@@ -5,13 +5,13 @@
  * TapStoryAudioModule for synchronized playback and recording.
  * 
  * Key benefits over expo-av:
- * - Perfect sync between playback and recording (shared audio clock)
+ * - Frame-aligned playback and capture with route compensation
  * - Frame-accurate timestamps
  * - Native multi-track mixing
  */
 import { Platform } from 'react-native';
 import { TapStoryNativeAudio, getTapStoryAudio, TrackInfo, RecordingResult } from './TapStoryNativeAudio';
-import { localAudioExists, getLocalAudioPath, downloadAndCacheAudio } from '../audioStorage';
+import { findCachedAudioPath, downloadAndCacheAudio } from '../audioStorage';
 
 export interface DuetSegment {
   id: string;
@@ -32,6 +32,33 @@ export type PlaybackStateType = typeof PlaybackState[keyof typeof PlaybackState]
 
 let instanceCounter = 0;
 
+interface TransportSession {
+  id: number;
+  capturesAudio: boolean;
+  captureStarted: boolean;
+  cancelled: boolean;
+  cancelledPromise: Promise<void>;
+  signalCancelled: () => void;
+}
+
+interface SessionCancelledError extends Error {
+  code: 'SESSION_CANCELLED';
+}
+
+function createSessionCancelledError(): SessionCancelledError {
+  const error = new Error('Audio transport session was cancelled') as SessionCancelledError;
+  error.name = 'SessionCancelledError';
+  error.code = 'SESSION_CANCELLED';
+  return error;
+}
+
+function hasErrorCode(error: unknown, code: string): boolean {
+  return typeof error === 'object'
+    && error !== null
+    && 'code' in error
+    && (error as { code?: unknown }).code === code;
+}
+
 /**
  * NativeDuetPlayer - Native audio-backed duet player
  */
@@ -43,11 +70,13 @@ export class NativeDuetPlayer {
   private isPlaying = false;
   private isRecording = false;
   private currentPositionMs = 0;
-  private callbackTime?: number;
-  private onReachTimeCallback?: () => void;
   private callbackTriggered = false;
   private positionCheckInterval?: NodeJS.Timeout;
   private recordingStartPositionMs = 0;
+  private initialized = false;
+  private initializationPromise?: Promise<void>;
+  private sessionCounter = 0;
+  private activeSession?: TransportSession;
 
   constructor() {
     this.instanceId = ++instanceCounter;
@@ -70,6 +99,25 @@ export class NativeDuetPlayer {
    * Initialize the player
    */
   async initialize(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+
+    if (!this.initializationPromise) {
+      this.initializationPromise = this.initializeNativeAudio();
+    }
+
+    const pendingInitialization = this.initializationPromise;
+    try {
+      await pendingInitialization;
+    } finally {
+      if (this.initializationPromise === pendingInitialization) {
+        this.initializationPromise = undefined;
+      }
+    }
+  }
+
+  private async initializeNativeAudio(): Promise<void> {
     this.log('Initializing');
     
     if (!this.nativeAudio.isAvailable()) {
@@ -77,7 +125,69 @@ export class NativeDuetPlayer {
     }
     
     await this.nativeAudio.initialize();
+    this.initialized = true;
     this.log('Initialized');
+  }
+
+  async configureLatencyCompensation(adjustmentMs: number = 0): Promise<number> {
+    await this.ensureInitialized();
+    const appliedMs = await this.nativeAudio.configureLatencyCompensation(adjustmentMs);
+    this.log(`Capture latency compensation: ${appliedMs.toFixed(2)}ms`);
+    return appliedMs;
+  }
+
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
+  }
+
+  private beginSession(capturesAudio: boolean): TransportSession {
+    this.cancelActiveSession();
+
+    let signalCancelled: () => void = () => undefined;
+    const cancelledPromise = new Promise<void>(resolve => {
+      signalCancelled = resolve;
+    });
+    const session: TransportSession = {
+      id: ++this.sessionCounter,
+      capturesAudio,
+      captureStarted: false,
+      cancelled: false,
+      cancelledPromise,
+      signalCancelled,
+    };
+    this.activeSession = session;
+    return session;
+  }
+
+  private isSessionActive(session: TransportSession): boolean {
+    return this.activeSession === session && !session.cancelled;
+  }
+
+  private assertSessionActive(session: TransportSession): void {
+    if (!this.isSessionActive(session)) {
+      throw createSessionCancelledError();
+    }
+  }
+
+  private cancelActiveSession(): TransportSession | undefined {
+    const session = this.activeSession;
+    if (!session) return undefined;
+
+    this.activeSession = undefined;
+    if (!session.cancelled) {
+      session.cancelled = true;
+      session.signalCancelled();
+    }
+    return session;
+  }
+
+  private async cleanupFailedSession(session: TransportSession): Promise<void> {
+    if (!this.isSessionActive(session)) return;
+    this.isPlaying = false;
+    this.isRecording = false;
+    await this.cleanup();
   }
 
   /**
@@ -88,17 +198,19 @@ export class NativeDuetPlayer {
       return segment.localUri;
     }
 
-    const hasLocal = await localAudioExists(segment.id);
-    if (hasLocal) {
-      return getLocalAudioPath(segment.id);
+    const cachedPath = await findCachedAudioPath(segment.id);
+    if (cachedPath) {
+      return cachedPath;
     }
 
     try {
       const localPath = await downloadAndCacheAudio(segment.audioUrl, segment.id);
       return localPath;
     } catch (error) {
-      console.warn('Failed to cache audio, using remote URL:', error);
-      return segment.audioUrl;
+      const detail = error instanceof Error ? `: ${error.message}` : '';
+      throw new Error(
+        `Failed to prepare audio segment ${segment.id} for native playback${detail}`
+      );
     }
   }
 
@@ -106,12 +218,14 @@ export class NativeDuetPlayer {
    * Load a chain of audio segments for playback
    */
   async loadChain(chain: DuetSegment[]): Promise<void> {
+    await this.ensureInitialized();
     this.log('Loading chain with', chain.length, 'segments');
 
     this.segments = [...chain];
 
     if (chain.length === 0) {
-      this.log('Empty chain, nothing to load');
+      await this.nativeAudio.loadTracks([]);
+      this.log('Empty chain, native mixer cleared');
       return;
     }
 
@@ -123,7 +237,7 @@ export class NativeDuetPlayer {
       nativeTracks.push({
         id: segment.id,
         uri: uri,
-        startTimeMs: segment.startTime * 1000, // Convert to milliseconds
+        startTimeMs: Math.round(segment.startTime * 1000),
       });
       
       this.log(`Prepared track ${segment.id.slice(0, 8)}: startTime=${segment.startTime}s`);
@@ -172,65 +286,112 @@ export class NativeDuetPlayer {
     callbackTime?: number,
     onReachTime?: () => void
   ): Promise<void> {
+    if (this.isRecording) {
+      throw new Error('Cannot start a new transport while capture is armed');
+    }
+    const capturesAudio = callbackTime !== undefined && onReachTime !== undefined;
+    const session = this.beginSession(capturesAudio);
+
+    try {
+      await this.ensureInitialized();
+      this.assertSessionActive(session);
+      await this.nativeAudio.stop();
+      this.assertSessionActive(session);
+    } catch (error) {
+      await this.cleanupFailedSession(session);
+      throw error;
+    }
     this.log(`playFrom: position=${position}s, callbackTime=${callbackTime}s`);
 
-    const positionMs = position * 1000;
+    const positionMs = Math.round(position * 1000);
     this.currentPositionMs = positionMs;
-    this.callbackTime = callbackTime !== undefined ? callbackTime * 1000 : undefined;
-    this.onReachTimeCallback = onReachTime;
     this.callbackTriggered = false;
+    if (capturesAudio) this.recordingStartPositionMs = 0;
 
     // If we need to start recording at a specific time, use playAndRecord
-    if (callbackTime !== undefined && onReachTime !== undefined) {
-      const recordStartMs = callbackTime * 1000;
+    if (capturesAudio) {
+      const recordStartMs = Math.round(callbackTime * 1000);
       
       this.isPlaying = true;
-      
-      await this.nativeAudio.playAndRecord(positionMs, recordStartMs, (actualStartMs) => {
-        this.log(`Recording started at ${actualStartMs}ms`);
-        this.recordingStartPositionMs = actualStartMs;
-        this.isRecording = true;
-        this.callbackTriggered = true;
-        
-        if (this.onReachTimeCallback) {
-          this.onReachTimeCallback();
-        }
-      });
+      // Capture is armed before the punch callback. Track that lifecycle now so
+      // Stop during preroll still drains and closes the native writer.
+      this.isRecording = true;
+      try {
+        await this.nativeAudio.playAndRecord(positionMs, recordStartMs, (actualStartMs) => {
+          if (!this.isSessionActive(session)) {
+            this.log(`Ignoring recording onset for cancelled session ${session.id}`);
+            return;
+          }
+          this.log(`Recording started at ${actualStartMs}ms`);
+          session.captureStarted = true;
+          this.recordingStartPositionMs = actualStartMs;
+          this.callbackTriggered = true;
+
+          onReachTime();
+        });
+        this.assertSessionActive(session);
+      } catch (error) {
+        await this.cleanupFailedSession(session);
+        throw error;
+      }
       
       // Start position monitoring
-      this.startPositionMonitoring();
+      this.startPositionMonitoring(session);
     } else {
       // Just playback, no recording
       this.isPlaying = true;
       this.isRecording = false;
       
-      await this.nativeAudio.play(positionMs);
-      this.startPositionMonitoring();
+      try {
+        await this.nativeAudio.play(positionMs);
+        this.assertSessionActive(session);
+      } catch (error) {
+        await this.cleanupFailedSession(session);
+        throw error;
+      }
+      this.startPositionMonitoring(session);
     }
   }
 
   /**
    * Start position monitoring
    */
-  private startPositionMonitoring(): void {
+  private startPositionMonitoring(session: TransportSession): void {
     this.stopPositionMonitoring();
 
-    this.positionCheckInterval = setInterval(async () => {
-      if (!this.isPlaying && !this.isRecording) {
-        this.stopPositionMonitoring();
+    const interval = setInterval(async () => {
+      if (!this.isSessionActive(session) || (!this.isPlaying && !this.isRecording)) {
+        clearInterval(interval);
+        if (this.positionCheckInterval === interval) {
+          this.positionCheckInterval = undefined;
+        }
         return;
       }
 
-      const currentPos = await this.getCurrentPosition();
+      const positionMs = await this.nativeAudio.getCurrentPositionMs();
+      if (!this.isSessionActive(session)) return;
+      this.currentPositionMs = positionMs;
+      const currentPos = positionMs / 1000;
       
       // Check if playback is complete
       const totalDuration = this.getTotalDuration();
       if (!this.isRecording && currentPos >= totalDuration) {
         this.log('Reached end of timeline');
         this.isPlaying = false;
-        this.stopPositionMonitoring();
+        this.cancelActiveSession();
+        clearInterval(interval);
+        if (this.positionCheckInterval === interval) {
+          this.positionCheckInterval = undefined;
+        }
+        try {
+          await this.nativeAudio.stop();
+        } catch (error) {
+          this.log('Failed to stop completed transport:', error);
+          await this.cleanup();
+        }
       }
     }, 50);
+    this.positionCheckInterval = interval;
   }
 
   private stopPositionMonitoring(): void {
@@ -244,8 +405,13 @@ export class NativeDuetPlayer {
    * Pause playback
    */
   async pause(): Promise<void> {
+    const session = this.activeSession;
+    if (!session) return;
+    await this.ensureInitialized();
+    this.assertSessionActive(session);
     this.log('pause');
     await this.nativeAudio.pause();
+    this.assertSessionActive(session);
     this.isPlaying = false;
     this.stopPositionMonitoring();
   }
@@ -254,10 +420,17 @@ export class NativeDuetPlayer {
    * Resume playback
    */
   async play(): Promise<void> {
+    const session = this.activeSession;
+    if (!session) {
+      throw new Error('No paused audio transport to resume');
+    }
+    await this.ensureInitialized();
+    this.assertSessionActive(session);
     this.log('play (resume)');
     await this.nativeAudio.resume();
+    this.assertSessionActive(session);
     this.isPlaying = true;
-    this.startPositionMonitoring();
+    this.startPositionMonitoring(session);
   }
 
   /**
@@ -266,34 +439,61 @@ export class NativeDuetPlayer {
    */
   async stop(): Promise<RecordingResult | null> {
     this.log('stop');
+    const stoppedSession = this.cancelActiveSession();
     this.stopPositionMonitoring();
     
-    const wasRecording = this.isRecording;
+    const wasRecording = stoppedSession?.capturesAudio ?? this.isRecording;
+    const wasWaitingForPunch = wasRecording
+      && !(stoppedSession?.captureStarted ?? this.callbackTriggered);
     this.isPlaying = false;
     this.isRecording = false;
     this.callbackTriggered = false;
 
-    // Stop playback first
-    await this.nativeAudio.stop();
-    
-    // Then get recording result if we were recording
-    if (wasRecording) {
-      const result = await this.nativeAudio.stopRecording();
-      if (result) {
-        this.log('Recording stopped:', result);
-        return result;
+    // Native initialization and transport commands share the same engine.
+    // Let an in-flight initialization settle before issuing the quiesce so a
+    // Stop cannot be reordered ahead of initialization on either bridge.
+    if (this.initializationPromise) {
+      try {
+        await this.initializationPromise;
+      } catch {
+        return null;
       }
     }
-    
-    return null;
+
+    // Stop the transport immediately so playback does not continue while a
+    // long take is drained/resampled. Native engines deliberately preserve the
+    // capture session until stopRecording() finalizes it.
+    try {
+      let result: RecordingResult | null = null;
+      try {
+        await this.nativeAudio.stop();
+      } finally {
+        if (wasRecording) result = await this.nativeAudio.stopRecording();
+      }
+
+      if (result) {
+        this.log('Recording stopped:', result);
+      }
+      return result;
+    } catch (error) {
+      // Stopping during preroll is a cancellation, not a failed take. Native
+      // modules reject because no PCM has crossed the punch gate yet.
+      if (wasWaitingForPunch && hasErrorCode(error, 'NO_RECORDING')) {
+        this.log('Pending punch cancelled before microphone capture began');
+        return null;
+      }
+      await this.cleanup();
+      throw error;
+    }
   }
 
   /**
    * Seek to a position
    */
   async seekTo(position: number): Promise<void> {
+    await this.ensureInitialized();
     this.log(`seekTo: ${position}s`);
-    this.currentPositionMs = position * 1000;
+    this.currentPositionMs = Math.round(position * 1000);
     await this.nativeAudio.seekTo(this.currentPositionMs);
   }
 
@@ -302,15 +502,25 @@ export class NativeDuetPlayer {
    */
   async cleanup(): Promise<void> {
     this.log('cleanup');
+    this.cancelActiveSession();
     this.stopPositionMonitoring();
     this.callbackTriggered = false;
-    this.callbackTime = undefined;
-    this.onReachTimeCallback = undefined;
     this.isPlaying = false;
     this.isRecording = false;
     this.segments = [];
+
+    if (this.initializationPromise) {
+      try {
+        await this.initializationPromise;
+      } catch {
+        return;
+      }
+    }
     
-    await this.nativeAudio.cleanup();
+    if (this.initialized) {
+      await this.nativeAudio.cleanup();
+      this.initialized = false;
+    }
   }
 
   /**
@@ -326,14 +536,67 @@ export class NativeDuetPlayer {
    * Returns immediately, recording runs in background
    */
   async startRecordingOnly(): Promise<void> {
-    this.log('startRecordingOnly');
-    this.isRecording = true;
-    this.isPlaying = false;
-    this.recordingStartPositionMs = 0;
-    this.currentPositionMs = 0;
-    
-    await this.nativeAudio.startRecording();
-    this.startPositionMonitoring();
+    if (this.isRecording) {
+      throw new Error('Cannot start a new transport while capture is armed');
+    }
+    const session = this.beginSession(true);
+
+    let signalCaptureStarted: () => void = () => undefined;
+    const captureStartedPromise = new Promise<void>(resolve => {
+      signalCaptureStarted = resolve;
+    });
+
+    try {
+      await this.ensureInitialized();
+      this.assertSessionActive(session);
+      this.log('startRecordingOnly');
+      this.segments = [];
+      await this.nativeAudio.loadTracks([]);
+      this.assertSessionActive(session);
+      await this.nativeAudio.configureCaptureOnlyLatencyCompensation();
+      this.assertSessionActive(session);
+      this.isRecording = true;
+      this.isPlaying = false;
+      this.callbackTriggered = false;
+      this.recordingStartPositionMs = 0;
+      this.currentPositionMs = 0;
+
+      await this.nativeAudio.playAndRecord(0, 0, actualStartMs => {
+        if (!this.isSessionActive(session)) {
+          this.log(`Ignoring first microphone frame for cancelled session ${session.id}`);
+          return;
+        }
+        session.captureStarted = true;
+        this.callbackTriggered = true;
+        this.recordingStartPositionMs = actualStartMs;
+        signalCaptureStarted();
+      });
+      this.assertSessionActive(session);
+
+      if (!session.captureStarted) {
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        try {
+          await Promise.race([
+            captureStartedPromise,
+            session.cancelledPromise.then(() => {
+              throw createSessionCancelledError();
+            }),
+            new Promise<never>((_, reject) => {
+              timeout = setTimeout(() => {
+                reject(new Error('Timed out waiting for the first microphone frame'));
+              }, 5_000);
+            }),
+          ]);
+        } finally {
+          if (timeout) clearTimeout(timeout);
+        }
+      }
+      this.assertSessionActive(session);
+      this.startPositionMonitoring(session);
+    } catch (error) {
+      await this.cleanupFailedSession(session);
+      throw error;
+    }
   }
 
   /**
@@ -348,4 +611,3 @@ export class NativeDuetPlayer {
 export function createNativeDuetPlayer(): NativeDuetPlayer {
   return new NativeDuetPlayer();
 }
-

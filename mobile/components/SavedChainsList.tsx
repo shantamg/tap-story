@@ -1,24 +1,10 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, ScrollView, LayoutChangeEvent, Modal, Alert } from 'react-native';
 import { colors } from '../utils/theme';
-
-interface ChainSegment {
-  id: string;
-  duration: number;
-  startTime: number;
-  parentId: string | null;
-}
-
-interface ChainSummary {
-  id: string;
-  chainLength: number;
-  totalDuration: number;
-  createdAt: string;
-  segments: ChainSegment[];
-}
+import type { AudioChainSegment, AudioChainSummary } from '@shared/types/audio';
 
 interface SavedChainsListProps {
-  chains: ChainSummary[];
+  chains: AudioChainSummary[];
   isLoading: boolean;
   selectedChainId: string | null;
   onSelectChain: (chainId: string) => void;
@@ -28,18 +14,18 @@ interface SavedChainsListProps {
 
 function TimelinePreview({ 
   segments, 
-  totalDuration,
+  totalDurationMs,
   containerWidth 
 }: { 
-  segments: ChainSegment[]; 
-  totalDuration: number;
+  segments: AudioChainSegment[];
+  totalDurationMs: number;
   containerWidth: number;
 }) {
-  if (segments.length === 0 || totalDuration === 0) return null;
+  if (segments.length === 0 || totalDurationMs === 0) return null;
 
   // Separate segments into top row (even indices) and bottom row (odd indices)
-  const topRowSegments: Array<{ segment: ChainSegment; index: number }> = [];
-  const bottomRowSegments: Array<{ segment: ChainSegment; index: number }> = [];
+  const topRowSegments: Array<{ segment: AudioChainSegment; index: number }> = [];
+  const bottomRowSegments: Array<{ segment: AudioChainSegment; index: number }> = [];
   
   segments.forEach((segment, index) => {
     if (index % 2 === 0) {
@@ -50,14 +36,14 @@ function TimelinePreview({
   });
 
   // Helper to convert time to pixel width
-  const timeToWidth = (duration: number): number => {
-    const width = (duration / totalDuration) * containerWidth;
+  const timeToWidth = (durationMs: number): number => {
+    const width = (durationMs / totalDurationMs) * containerWidth;
     return Math.max(width, 30); // Minimum width
   };
 
   // Helper to convert time to pixel position
-  const timeToLeft = (startTime: number): number => {
-    return (startTime / totalDuration) * containerWidth;
+  const timeToLeft = (startTimeMs: number): number => {
+    return (startTimeMs / totalDurationMs) * containerWidth;
   };
 
   return (
@@ -65,8 +51,8 @@ function TimelinePreview({
       {/* Top row - even indices (0, 2, 4, ...) */}
       <View style={previewStyles.trackRow}>
         {topRowSegments.map(({ segment, index }) => {
-          const width = timeToWidth(segment.duration);
-          const left = timeToLeft(segment.startTime);
+          const width = timeToWidth(segment.durationMs);
+          const left = timeToLeft(segment.startTimeMs);
           return (
             <View
               key={segment.id}
@@ -86,8 +72,8 @@ function TimelinePreview({
       {/* Bottom row - odd indices (1, 3, 5, ...) */}
       <View style={previewStyles.trackRow}>
         {bottomRowSegments.map(({ segment, index }) => {
-          const width = timeToWidth(segment.duration);
-          const left = timeToLeft(segment.startTime);
+          const width = timeToWidth(segment.durationMs);
+          const left = timeToLeft(segment.startTimeMs);
           return (
             <View
               key={segment.id}
@@ -167,7 +153,7 @@ export function SavedChainsList({
     : chains;
 
   // Generate a name for each story (could be improved with actual names from backend)
-  const getStoryName = (chain: ChainSummary, index: number) => {
+  const getStoryName = (chain: AudioChainSummary, index: number) => {
     // For now, use a simple naming scheme
     return `Story ${visibleChains.length - index}`;
   };
@@ -218,7 +204,7 @@ export function SavedChainsList({
               <View style={styles.timelineContainer}>
                 <TimelinePreview
                   segments={chain.segments}
-                  totalDuration={chain.totalDuration}
+                  totalDurationMs={chain.totalDurationMs}
                   containerWidth={containerWidth}
                 />
               </View>

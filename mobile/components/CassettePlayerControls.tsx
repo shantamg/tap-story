@@ -17,6 +17,31 @@ interface CassettePlayerControlsProps {
   onFastForward: () => void;
 }
 
+type ControlAvailabilityInput = Pick<
+  CassettePlayerControlsProps,
+  | 'isLoading'
+  | 'isDownloadingAudio'
+  | 'hasAudio'
+  | 'isRecording'
+  | 'isWaitingToRecord'
+>;
+
+export function getCassetteControlAvailability({
+  isLoading,
+  isDownloadingAudio = false,
+  hasAudio,
+  isRecording,
+  isWaitingToRecord,
+}: ControlAvailabilityInput) {
+  const sessionLocked = isRecording || isWaitingToRecord;
+  return {
+    playDisabled: isLoading || isDownloadingAudio || !hasAudio || sessionLocked,
+    recordDisabled: isLoading || isDownloadingAudio || isWaitingToRecord,
+    seekDisabled: isLoading || isDownloadingAudio || sessionLocked,
+    stopDisabled: isLoading,
+  };
+}
+
 export function CassettePlayerControls({
   isPlaying,
   isRecording,
@@ -31,9 +56,18 @@ export function CassettePlayerControls({
   onRewind,
   onFastForward,
 }: CassettePlayerControlsProps) {
-  const playDisabled = isLoading || isDownloadingAudio || !hasAudio || isRecording;
-  const recordDisabled = isLoading || isDownloadingAudio;
-  const rewindDisabled = isLoading || isDownloadingAudio || isRecording;
+  const {
+    playDisabled,
+    recordDisabled,
+    seekDisabled,
+    stopDisabled,
+  } = getCassetteControlAvailability({
+    isLoading,
+    isDownloadingAudio,
+    hasAudio,
+    isRecording,
+    isWaitingToRecord,
+  });
   return (
     <View style={styles.container}>
       <View style={styles.buttonRow}>
@@ -41,17 +75,17 @@ export function CassettePlayerControls({
         <TouchableOpacity
           style={[styles.button, styles.secondaryButton]}
           onPress={onRewind}
-          disabled={rewindDisabled}
+          disabled={seekDisabled}
         >
           <DoubleTriangle direction="left" />
         </TouchableOpacity>
 
         {/* Stop button (Square) - show when playing or recording */}
-        {(isPlaying || isRecording) && (
+        {(isPlaying || isRecording || isWaitingToRecord) && (
           <TouchableOpacity
             style={[styles.button, styles.stopButton]}
             onPress={onStop}
-            disabled={isLoading}
+            disabled={stopDisabled}
           >
             <View style={styles.square} />
           </TouchableOpacity>
@@ -86,7 +120,7 @@ export function CassettePlayerControls({
         <TouchableOpacity
           style={[styles.button, styles.secondaryButton]}
           onPress={onFastForward}
-          disabled={rewindDisabled}
+          disabled={seekDisabled}
         >
           <DoubleTriangle direction="right" />
         </TouchableOpacity>

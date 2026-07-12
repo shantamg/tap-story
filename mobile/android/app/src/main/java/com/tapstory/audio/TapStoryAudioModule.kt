@@ -1,13 +1,14 @@
 package com.tapstory.audio
 
 import android.content.Context
+import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
 import android.media.AudioManager
 import android.os.Build
 import android.util.Log
 import com.facebook.react.bridge.*
 import com.facebook.react.modules.core.DeviceEventManagerModule
-import kotlin.math.max
+import kotlin.math.roundToLong
 
 /**
  * TapStoryAudioModule - React Native bridge for synchronized audio playback and recording
@@ -25,29 +26,61 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
 
     private var audioEngine: TapStoryAudioEngine? = null
     private var isInitialized = false
+    private var routeCallbackRegistered = false
+    private val routeLock = Any()
+    private val moduleLifecycleLock = Any()
+    private var knownAudioDeviceIds: Set<Int> = emptySet()
+    private val audioManager: AudioManager
+        get() = reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
+    private val audioDeviceCallback = object : AudioDeviceCallback() {
+        override fun onAudioDevicesAdded(addedDevices: Array<out AudioDeviceInfo>) {
+            if (addedDevices.isNotEmpty()) invalidateIfDeviceSetChanged()
+        }
+
+        override fun onAudioDevicesRemoved(removedDevices: Array<out AudioDeviceInfo>) {
+            if (removedDevices.isNotEmpty()) invalidateIfDeviceSetChanged()
+        }
+    }
 
     override fun getName(): String = NAME
+
+    override fun invalidate() {
+        try {
+            releaseAudioEngine()
+        } catch (error: Exception) {
+            Log.e(TAG, "Failed to release audio during module invalidation", error)
+        }
+        super.invalidate()
+    }
 
     /**
      * Initialize the audio engine with Oboe
      */
     @ReactMethod
     fun initialize(promise: Promise) {
-        try {
-            Log.d(TAG, "Initializing TapStoryAudioEngine")
-            
-            if (audioEngine == null) {
-                audioEngine = TapStoryAudioEngine(reactContext)
+        synchronized(moduleLifecycleLock) {
+            try {
+                Log.d(TAG, "Initializing TapStoryAudioEngine")
+
+                if (audioEngine == null) {
+                    audioEngine = TapStoryAudioEngine(reactContext)
+                }
+
+                audioEngine?.initialize()
+                isInitialized = true
+                registerRouteCallback()
+
+                Log.d(TAG, "TapStoryAudioEngine initialized successfully")
+                promise.resolve(null)
+            } catch (e: Exception) {
+                Log.e(TAG, "Failed to initialize audio engine", e)
+                try {
+                    releaseAudioEngine()
+                } catch (cleanupError: Exception) {
+                    Log.e(TAG, "Failed to clean up after initialization error", cleanupError)
+                }
+                promise.reject("INIT_ERROR", "Failed to initialize audio engine: ${e.message}", e)
             }
-            
-            audioEngine?.initialize()
-            isInitialized = true
-            
-            Log.d(TAG, "TapStoryAudioEngine initialized successfully")
-            promise.resolve(null)
-        } catch (e: Exception) {
-            Log.e(TAG, "Failed to initialize audio engine", e)
-            promise.reject("INIT_ERROR", "Failed to initialize audio engine: ${e.message}", e)
         }
     }
 
@@ -74,7 +107,7 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
                         TrackInfo(
                             id = track.getString("id") ?: "",
                             uri = track.getString("uri") ?: "",
-                            startTimeMs = track.getDouble("startTimeMs").toLong()
+                            startTimeMs = track.getDouble("startTimeMs").roundToLong()
                         )
                     )
                 }
@@ -102,7 +135,7 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
             }
 
             Log.d(TAG, "Starting playback from ${playFromMs}ms")
-            audioEngine?.play(playFromMs.toLong())
+            audioEngine?.play(playFromMs.roundToLong())
             promise.resolve(null)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to start playback", e)
@@ -127,8 +160,8 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
             Log.d(TAG, "Starting playback from ${playFromMs}ms, recording at ${recordStartMs}ms")
             
             audioEngine?.playAndRecord(
-                playFromMs.toLong(),
-                recordStartMs.toLong()
+                playFromMs.roundToLong(),
+                recordStartMs.roundToLong()
             ) { actualStartMs ->
                 // Emit event when recording actually starts
                 sendEvent("onRecordingStarted", Arguments.createMap().apply {
@@ -159,6 +192,25 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get current position", e)
             promise.reject("POSITION_ERROR", "Failed to get current position: ${e.message}", e)
+        }
+    }
+
+    @ReactMethod
+    fun setLatencyCompensationMs(compensationMs: Double, promise: Promise) {
+        try {
+            val engine = audioEngine
+            if (!isInitialized || engine == null) {
+                promise.reject("NOT_INITIALIZED", "Audio engine not initialized")
+                return
+            }
+            engine.setLatencyCompensationMs(compensationMs)
+            promise.resolve(null)
+        } catch (e: Exception) {
+            promise.reject(
+                "LATENCY_COMPENSATION_ERROR",
+                "Failed to set latency compensation: ${e.message}",
+                e
+            )
         }
     }
 
@@ -196,6 +248,23 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
                     putString("uri", result.uri)
                     putDouble("startTimeMs", result.startTimeMs.toDouble())
                     putDouble("durationMs", result.durationMs.toDouble())
+                    putDouble("startFrame", result.startFrame.toDouble())
+                    putDouble("actualStartFrame", result.actualStartFrame.toDouble())
+                    putDouble("endFrame", result.endFrame.toDouble())
+                    putDouble("frameCount", result.frameCount.toDouble())
+                    putDouble("rawInputFrameCount", result.rawInputFrameCount.toDouble())
+                    putDouble("droppedFrameCount", result.droppedFrameCount.toDouble())
+                    putDouble(
+                        "shortInputFrameCount",
+                        result.shortInputFrameCount.toDouble()
+                    )
+                    putDouble(
+                        "clockDriftFrameLimit",
+                        result.clockDriftFrameLimit.toDouble()
+                    )
+                    putInt("inputXRunCount", result.inputXRunCount)
+                    putInt("outputXRunCount", result.outputXRunCount)
+                    putInt("sampleRate", result.sampleRate)
                 }
                 promise.resolve(response)
             } else {
@@ -214,9 +283,7 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
     fun cleanup(promise: Promise) {
         try {
             Log.d(TAG, "Cleaning up audio engine")
-            audioEngine?.cleanup()
-            audioEngine = null
-            isInitialized = false
+            releaseAudioEngine()
             promise.resolve(null)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to cleanup", e)
@@ -224,63 +291,129 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
         }
     }
 
-    /**
-     * Get the device's estimated hardware round-trip latency.
-     * 
-     * We compare two methods and use the MAXIMUM:
-     * 1. Buffer-based calculation: (frames / sampleRate) * 2 + overhead
-     * 2. OS-reported output latency (if available)
-     * 
-     * The OS often knows about hidden DSP delays that buffer math misses.
-     */
+    private fun releaseAudioEngine() = synchronized(moduleLifecycleLock) {
+        unregisterRouteCallback()
+        audioEngine?.cleanup()
+        audioEngine = null
+        isInitialized = false
+    }
+
+    private fun registerRouteCallback() {
+        if (!routeCallbackRegistered && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            synchronized(routeLock) {
+                knownAudioDeviceIds = currentAudioDeviceIds()
+            }
+            audioManager.registerAudioDeviceCallback(audioDeviceCallback, null)
+            routeCallbackRegistered = true
+        }
+    }
+
+    private fun unregisterRouteCallback() {
+        if (routeCallbackRegistered && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioManager.unregisterAudioDeviceCallback(audioDeviceCallback)
+            routeCallbackRegistered = false
+            synchronized(routeLock) {
+                knownAudioDeviceIds = emptySet()
+            }
+        }
+    }
+
+    private fun invalidateAudioRoute() {
+        if (!isInitialized) return
+        Log.w(TAG, "Audio device topology changed; synchronized engine must be rebuilt")
+        audioEngine?.invalidateAudioRoute()
+    }
+
+    private fun invalidateIfDeviceSetChanged() {
+        val changed = synchronized(routeLock) {
+            val current = currentAudioDeviceIds()
+            if (current == knownAudioDeviceIds) {
+                false
+            } else {
+                knownAudioDeviceIds = current
+                true
+            }
+        }
+        if (changed) invalidateAudioRoute()
+    }
+
+    private fun currentAudioDeviceIds(): Set<Int> =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            audioManager.getDevices(AudioManager.GET_DEVICES_ALL).mapTo(mutableSetOf()) { it.id }
+        } else {
+            emptySet()
+        }
+
+    /** Returns Oboe timestamp-derived latency, or -1 when unavailable. */
     @ReactMethod
     fun getEstimatedLatency(promise: Promise) {
         try {
-            val audioManager = reactContext.getSystemService(Context.AUDIO_SERVICE) as AudioManager
-            
-            // Get the native sample rate and buffer size
-            val sampleRateString = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_SAMPLE_RATE)
-            val framesPerBufferString = audioManager.getProperty(AudioManager.PROPERTY_OUTPUT_FRAMES_PER_BUFFER)
-            
-            val sampleRate = sampleRateString?.toDoubleOrNull() ?: 44100.0
-            val framesPerBuffer = framesPerBufferString?.toDoubleOrNull() ?: 256.0
-            
-            // Method 1: Calculate buffer latency in milliseconds
-            // Latency = (frames / sampleRate) * 1000
-            // We have at least 2 buffers in the pipeline (input + output)
-            val bufferLatencyMs = (framesPerBuffer / sampleRate) * 1000.0 * 2.0
-            
-            // Add processing overhead (typically 5-15ms on modern devices)
-            // On cheaper phones this can be 20-50ms for DSP processing
-            val processingOverhead = 15.0
-            val calculatedLatency = bufferLatencyMs + processingOverhead
-            
-            // Method 2: Check if OS reports output latency directly
-            // Note: This property may not exist on all devices
-            val reportedLatencyString = try {
-                // PROPERTY_OUTPUT_LATENCY is not a standard constant, 
-                // but some OEMs expose it. We try to get it anyway.
-                audioManager.getProperty("android.media.property.OUTPUT_LATENCY")
-            } catch (e: Exception) {
-                null
-            }
-            val reportedLatency = reportedLatencyString?.toDoubleOrNull() ?: 0.0
-            
-            // Use the MAXIMUM of reported vs calculated
-            // The OS usually knows about hidden DSP delays that buffer math misses
-            val finalLatency = if (reportedLatency > 0) {
-                max(reportedLatency, calculatedLatency)
-            } else {
-                calculatedLatency
-            }
-            
-            Log.d(TAG, "Audio Config: sampleRate=$sampleRate, framesPerBuffer=$framesPerBuffer")
-            Log.d(TAG, "Latency Check: Reported=${reportedLatency}ms, Calculated=${calculatedLatency}ms, Final=${finalLatency}ms")
-            
-            promise.resolve(finalLatency)
+            val diagnostics = audioEngine?.getDiagnostics()
+            val input = diagnostics?.inputLatencyMs ?: -1.0
+            val output = diagnostics?.outputLatencyMs ?: -1.0
+            promise.resolve(if (input >= 0.0 && output >= 0.0) input + output else -1.0)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to get latency", e)
-            promise.resolve(40.0) // Safe fallback for average Android (increased from 30)
+            promise.resolve(-1.0)
+        }
+    }
+
+    @ReactMethod
+    fun getAudioDiagnostics(promise: Promise) {
+        try {
+            val diagnostics = audioEngine?.getDiagnostics()
+            if (!isInitialized || diagnostics == null) {
+                promise.reject("NOT_INITIALIZED", "Audio engine not initialized")
+                return
+            }
+            promise.resolve(Arguments.createMap().apply {
+                putInt("sampleRate", diagnostics.sampleRate)
+                putDouble("inputLatencyMs", diagnostics.inputLatencyMs)
+                putDouble("outputLatencyMs", diagnostics.outputLatencyMs)
+                putInt("inputXRunCount", diagnostics.inputXRunCount)
+                putInt("outputXRunCount", diagnostics.outputXRunCount)
+                putInt("inputFramesPerBurst", diagnostics.inputFramesPerBurst)
+                putInt("outputFramesPerBurst", diagnostics.outputFramesPerBurst)
+                putInt("inputPerformanceMode", diagnostics.inputPerformanceMode)
+                putInt("outputPerformanceMode", diagnostics.outputPerformanceMode)
+                putInt("lastStreamError", diagnostics.lastStreamError)
+                putDouble("requestedPunchFrame", diagnostics.requestedPunchFrame.toDouble())
+                putDouble(
+                    "actualRecordingStartFrame",
+                    diagnostics.actualRecordingStartFrame.toDouble()
+                )
+                putDouble("recordingEndFrame", diagnostics.recordingEndFrame.toDouble())
+                putDouble(
+                    "latencyCompensationFrames",
+                    diagnostics.latencyCompensationFrames.toDouble()
+                )
+                putDouble(
+                    "latencyCompensationMs",
+                    if (diagnostics.sampleRate > 0) {
+                        diagnostics.latencyCompensationFrames * 1000.0 / diagnostics.sampleRate
+                    } else {
+                        0.0
+                    }
+                )
+                putDouble("rawInputFrameCount", diagnostics.rawInputFrameCount.toDouble())
+                putDouble(
+                    "droppedCaptureFrameCount",
+                    diagnostics.droppedCaptureFrameCount.toDouble()
+                )
+                putDouble(
+                    "shortInputFrameCount",
+                    diagnostics.shortInputFrameCount.toDouble()
+                )
+                putDouble(
+                    "clockDriftFrameLimit",
+                    diagnostics.clockDriftFrameLimit.toDouble()
+                )
+                putBoolean("captureOnsetExact", diagnostics.captureOnsetExact)
+                putInt("inputXRunDelta", diagnostics.inputXRunDelta)
+                putInt("outputXRunDelta", diagnostics.outputXRunDelta)
+            })
+        } catch (e: Exception) {
+            promise.reject("DIAGNOSTICS_ERROR", "Failed to read audio diagnostics: ${e.message}", e)
         }
     }
 
@@ -318,7 +451,11 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
             promise.resolve(isBluetooth)
         } catch (e: Exception) {
             Log.e(TAG, "Failed to check Bluetooth", e)
-            promise.resolve(false)
+            promise.reject(
+                "ROUTE_CHECK_ERROR",
+                "Unable to verify that the active audio route supports synchronized overdubs",
+                e
+            )
         }
     }
 
@@ -344,4 +481,3 @@ class TapStoryAudioModule(private val reactContext: ReactApplicationContext) :
         // Keep: Required for RN NativeEventEmitter
     }
 }
-

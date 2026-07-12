@@ -3,26 +3,36 @@ import { Platform } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const AUDIO_DIRECTORY = `${FileSystem.documentDirectory}audio/`;
-const LATENCY_KEY = 'tapstory_latency_offset_ms';
+const LATENCY_KEY = 'tapstory_latency_adjustment_ms_v2';
+const MAX_LATENCY_ADJUSTMENT_MS = 250;
 
 /**
- * Save global latency offset
+ * Save the signed fine-tune applied around automatic route latency.
  */
 export async function saveLatencyOffset(offsetMs: number): Promise<void> {
   try {
-    await AsyncStorage.setItem(LATENCY_KEY, offsetMs.toString());
+    const bounded = Number.isFinite(offsetMs)
+      ? Math.max(-MAX_LATENCY_ADJUSTMENT_MS, Math.min(MAX_LATENCY_ADJUSTMENT_MS, offsetMs))
+      : 0;
+    await AsyncStorage.setItem(LATENCY_KEY, bounded.toString());
   } catch (e) {
     console.error('Failed to save latency offset:', e);
   }
 }
 
 /**
- * Get global latency offset
+ * Get the signed fine-tune applied around automatic route latency.
  */
 export async function getLatencyOffset(): Promise<number> {
   try {
     const value = await AsyncStorage.getItem(LATENCY_KEY);
-    return value ? parseInt(value, 10) : 0;
+    if (!value) return 0;
+    const parsed = Number(value);
+    return Number.isFinite(parsed)
+      && parsed >= -MAX_LATENCY_ADJUSTMENT_MS
+      && parsed <= MAX_LATENCY_ADJUSTMENT_MS
+      ? parsed
+      : 0;
   } catch (e) {
     console.error('Failed to get latency offset:', e);
     return 0;
@@ -42,18 +52,51 @@ async function ensureDirectoryExists(): Promise<void> {
 /**
  * Get the local file path for an audio node
  */
-export function getLocalAudioPath(nodeId: string): string {
-  const extension = Platform.OS === 'ios' ? 'm4a' : 'webm';
+export function getLocalAudioPath(nodeId: string, sourceUri?: string): string {
+  const extension = getAudioExtension(sourceUri)
+    ?? (Platform.OS === 'ios' ? 'm4a' : 'webm');
   return `${AUDIO_DIRECTORY}${nodeId}.${extension}`;
+}
+
+const SUPPORTED_AUDIO_EXTENSIONS = new Set([
+  'aac',
+  'caf',
+  'flac',
+  'm4a',
+  'mp3',
+  'mp4',
+  'ogg',
+  'wav',
+  'webm',
+]);
+
+function getAudioExtension(uri?: string): string | null {
+  if (!uri) return null;
+
+  const path = uri.split(/[?#]/, 1)[0];
+  const match = path.match(/\.([a-z0-9]+)$/i);
+  if (!match) return null;
+
+  const extension = match[1].toLowerCase();
+  return SUPPORTED_AUDIO_EXTENSIONS.has(extension) ? extension : null;
+}
+
+/** Find an existing cache entry without assuming its codec/container. */
+export async function findCachedAudioPath(nodeId: string): Promise<string | null> {
+  const directoryInfo = await FileSystem.getInfoAsync(AUDIO_DIRECTORY);
+  if (!directoryInfo.exists) return null;
+
+  const prefix = `${nodeId}.`;
+  const files = await FileSystem.readDirectoryAsync(AUDIO_DIRECTORY);
+  const filename = files.find(file => file.startsWith(prefix) && !file.endsWith('.download'));
+  return filename ? `${AUDIO_DIRECTORY}${filename}` : null;
 }
 
 /**
  * Check if a local audio file exists
  */
 export async function localAudioExists(nodeId: string): Promise<boolean> {
-  const path = getLocalAudioPath(nodeId);
-  const info = await FileSystem.getInfoAsync(path);
-  return info.exists;
+  return (await findCachedAudioPath(nodeId)) !== null;
 }
 
 /**
@@ -68,7 +111,7 @@ export async function saveRecordingLocally(
 ): Promise<string> {
   await ensureDirectoryExists();
 
-  const localPath = getLocalAudioPath(nodeId);
+  const localPath = getLocalAudioPath(nodeId, tempUri);
 
   // Copy from temp location to permanent storage
   await FileSystem.copyAsync({
@@ -91,20 +134,33 @@ export async function downloadAndCacheAudio(
 ): Promise<string> {
   await ensureDirectoryExists();
 
-  const localPath = getLocalAudioPath(nodeId);
-
-  // Check if already cached
-  const exists = await localAudioExists(nodeId);
-  if (exists) {
-    return localPath;
+  const cachedPath = await findCachedAudioPath(nodeId);
+  if (cachedPath) {
+    return cachedPath;
   }
 
-  // Download to local storage
-  const downloadResult = await FileSystem.downloadAsync(remoteUrl, localPath);
+  const normalizedRemoteUrl = remoteUrl.trim();
+  if (!normalizedRemoteUrl) {
+    throw new Error(`Audio segment ${nodeId} has no downloadable URL`);
+  }
+  if (!/^https?:\/\//i.test(normalizedRemoteUrl)) {
+    throw new Error(`Audio segment ${nodeId} has an unsupported download URL`);
+  }
+
+  const localPath = getLocalAudioPath(nodeId, normalizedRemoteUrl);
+  const temporaryPath = `${localPath}.download`;
+
+  // Download to a temporary path so interrupted downloads are never treated as
+  // playable cache entries.
+  await FileSystem.deleteAsync(temporaryPath, { idempotent: true });
+  const downloadResult = await FileSystem.downloadAsync(normalizedRemoteUrl, temporaryPath);
 
   if (downloadResult.status !== 200) {
+    await FileSystem.deleteAsync(temporaryPath, { idempotent: true });
     throw new Error(`Failed to download audio: ${downloadResult.status}`);
   }
+
+  await FileSystem.moveAsync({ from: temporaryPath, to: localPath });
 
   return localPath;
 }
@@ -119,10 +175,10 @@ export async function getPlaybackUri(
   nodeId: string,
   remoteUrl: string
 ): Promise<{ uri: string; isLocal: boolean }> {
-  const exists = await localAudioExists(nodeId);
+  const cachedPath = await findCachedAudioPath(nodeId);
 
-  if (exists) {
-    return { uri: getLocalAudioPath(nodeId), isLocal: true };
+  if (cachedPath) {
+    return { uri: cachedPath, isLocal: true };
   }
 
   return { uri: remoteUrl, isLocal: false };
@@ -132,11 +188,13 @@ export async function getPlaybackUri(
  * Delete a local audio file
  */
 export async function deleteLocalAudio(nodeId: string): Promise<void> {
-  const path = getLocalAudioPath(nodeId);
-  const info = await FileSystem.getInfoAsync(path);
+  const directoryInfo = await FileSystem.getInfoAsync(AUDIO_DIRECTORY);
+  if (!directoryInfo.exists) return;
 
-  if (info.exists) {
-    await FileSystem.deleteAsync(path, { idempotent: true });
+  const prefix = `${nodeId}.`;
+  const files = await FileSystem.readDirectoryAsync(AUDIO_DIRECTORY);
+  for (const file of files.filter(filename => filename.startsWith(prefix))) {
+    await FileSystem.deleteAsync(`${AUDIO_DIRECTORY}${file}`, { idempotent: true });
   }
 }
 

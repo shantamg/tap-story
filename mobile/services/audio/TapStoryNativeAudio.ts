@@ -2,10 +2,10 @@
  * TapStoryNativeAudio - TypeScript wrapper for the native audio module
  * 
  * Provides synchronized audio playback and recording using native code
- * (AVAudioEngine on iOS, AudioTrack/AudioRecord on Android)
+ * (RemoteIO AudioUnit on iOS, Oboe FullDuplexStream on Android)
  * 
  * Key features:
- * - Perfect sync between playback and recording via shared audio clock
+ * - Frame-aligned playback/capture with route latency compensation
  * - Frame-accurate timestamps
  * - Multi-track mixing
  */
@@ -25,6 +25,17 @@ interface TapStoryAudioModuleInterface {
   pause?(): Promise<void>;
   resume?(): Promise<void>;
   cleanup(): Promise<void>;
+  setLatencyCompensationMs?(latencyMs: number): Promise<void>;
+  getEstimatedLatency?(): Promise<number>;
+  getLatencyInfo?(): Promise<{
+    inputLatencyMs?: number;
+    outputLatencyMs?: number;
+  }>;
+  getAudioDiagnostics?(): Promise<{
+    inputLatencyMs?: number;
+    outputLatencyMs?: number;
+  }>;
+  isBluetoothConnected?(): Promise<boolean>;
   addListener(eventName: string): void;
   removeListeners(count: number): void;
   
@@ -74,6 +85,17 @@ type PositionUpdateListener = (event: PositionUpdateEvent) => void;
 type RecordingStartedListener = (event: RecordingStartedEvent) => void;
 type PlaybackCompleteListener = () => void;
 
+export function getAdjustedLatencyCompensationMs(
+  automaticMs: number,
+  adjustmentMs: number
+): number {
+  const automatic = Number.isFinite(automaticMs) ? Math.max(0, automaticMs) : 0;
+  const adjustment = Number.isFinite(adjustmentMs)
+    ? Math.max(-250, Math.min(250, adjustmentMs))
+    : 0;
+  return Math.max(1, Math.min(1_000, automatic + adjustment));
+}
+
 /**
  * Get the native module (with fallback for platforms where it's not available)
  */
@@ -105,6 +127,7 @@ export class TapStoryNativeAudio {
   private positionListeners: PositionUpdateListener[] = [];
   private recordingStartedListeners: RecordingStartedListener[] = [];
   private playbackCompleteListeners: PlaybackCompleteListener[] = [];
+  private pendingRecordingStartedListener: RecordingStartedListener | null = null;
   private subscriptions: { remove: () => void }[] = [];
   
   private constructor() {
@@ -219,14 +242,24 @@ export class TapStoryNativeAudio {
     
     // Add one-time listener for recording started
     if (onRecordingStarted) {
+      this.clearPendingRecordingStartedListener();
       const listener = (event: RecordingStartedEvent) => {
         onRecordingStarted(event.actualStartMs);
         this.removeRecordingStartedListener(listener);
+        if (this.pendingRecordingStartedListener === listener) {
+          this.pendingRecordingStartedListener = null;
+        }
       };
+      this.pendingRecordingStartedListener = listener;
       this.addRecordingStartedListener(listener);
     }
-    
-    await this.nativeModule.playAndRecord(playFromMs, recordStartMs);
+
+    try {
+      await this.nativeModule.playAndRecord(playFromMs, recordStartMs);
+    } catch (error) {
+      this.clearPendingRecordingStartedListener();
+      throw error;
+    }
   }
   
   /**
@@ -246,6 +279,83 @@ export class TapStoryNativeAudio {
     
     console.log('[TapStoryNativeAudio] Starting recording only');
     await this.nativeModule.startRecording();
+  }
+
+  /**
+   * Configure the total round-trip compensation used to gate captured PCM.
+   * The signed value fine-tunes the platform's route estimate; zero keeps
+   * automatic mode. Bluetooth is rejected because its variable buffering
+   * cannot meet Tap Story's tight-overdub guarantee.
+   */
+  async configureLatencyCompensation(adjustmentMs: number = 0): Promise<number> {
+    if (!this.nativeModule) {
+      throw new Error('Native audio module not available');
+    }
+
+    if (
+      Platform.OS === 'android'
+      && this.nativeModule.isBluetoothConnected
+      && await this.nativeModule.isBluetoothConnected()
+    ) {
+      throw new Error(
+        'Bluetooth audio has variable latency and is not supported for synchronized overdubs. Use the built-in route or wired headphones.'
+      );
+    }
+
+    const boundedAdjustmentMs = Number.isFinite(adjustmentMs)
+      ? Math.max(-250, Math.min(250, adjustmentMs))
+      : 0;
+    let automaticMs = 0;
+    if (this.nativeModule.getEstimatedLatency) {
+      const estimatedMs = await this.nativeModule.getEstimatedLatency();
+      if (!Number.isFinite(estimatedMs) || estimatedMs <= 0) {
+        throw new Error(
+          'The Android audio route did not provide a usable latency timestamp. Run a wired-route calibration before recording an overdub.'
+        );
+      }
+      automaticMs = estimatedMs;
+    } else if (this.nativeModule.getLatencyInfo) {
+      const latency = await this.nativeModule.getLatencyInfo();
+      automaticMs = Math.max(
+        0,
+        (latency.inputLatencyMs ?? 0) + (latency.outputLatencyMs ?? 0)
+      );
+    }
+
+    const useNativeAutomatic = boundedAdjustmentMs === 0 && Platform.OS === 'ios';
+    const compensationMs = useNativeAutomatic
+      ? 0
+      : getAdjustedLatencyCompensationMs(automaticMs, boundedAdjustmentMs);
+    if (this.nativeModule.setLatencyCompensationMs) {
+      await this.nativeModule.setLatencyCompensationMs(compensationMs);
+    }
+    return useNativeAutomatic
+      ? automaticMs
+      : compensationMs;
+  }
+
+  /**
+   * A standalone first take has no output reference. Its timeline must be
+   * gated and tailed by microphone input latency only.
+   */
+  async configureCaptureOnlyLatencyCompensation(): Promise<number> {
+    if (!this.nativeModule) {
+      throw new Error('Native audio module not available');
+    }
+
+    const latency = this.nativeModule.getLatencyInfo
+      ? await this.nativeModule.getLatencyInfo()
+      : this.nativeModule.getAudioDiagnostics
+        ? await this.nativeModule.getAudioDiagnostics()
+        : {};
+    const inputLatencyMs = latency.inputLatencyMs ?? 0;
+    const compensationMs = Number.isFinite(inputLatencyMs) && inputLatencyMs > 0
+      ? Math.min(1_000, inputLatencyMs)
+      : 0;
+    if (this.nativeModule.setLatencyCompensationMs) {
+      await this.nativeModule.setLatencyCompensationMs(compensationMs);
+    }
+    return compensationMs;
   }
   
   /**
@@ -270,18 +380,22 @@ export class TapStoryNativeAudio {
     }
     
     console.log('[TapStoryNativeAudio] Stopping recording');
-    const result = await this.nativeModule.stopRecording();
-    
-    if (result) {
-      console.log('[TapStoryNativeAudio] Recording result:', result);
-      return {
-        uri: result.uri,
-        startTimeMs: result.startTimeMs,
-        durationMs: result.durationMs,
-      };
+    try {
+      const result = await this.nativeModule.stopRecording();
+
+      if (result) {
+        console.log('[TapStoryNativeAudio] Recording result:', result);
+        return {
+          uri: result.uri,
+          startTimeMs: result.startTimeMs,
+          durationMs: result.durationMs,
+        };
+      }
+
+      return null;
+    } finally {
+      this.clearPendingRecordingStartedListener();
     }
-    
-    return null;
   }
   
   /**
@@ -359,8 +473,12 @@ export class TapStoryNativeAudio {
     }
     
     console.log('[TapStoryNativeAudio] Cleaning up');
-    await this.nativeModule.cleanup();
-    this.isInitialized = false;
+    try {
+      await this.nativeModule.cleanup();
+    } finally {
+      this.clearPendingRecordingStartedListener();
+      this.isInitialized = false;
+    }
   }
   
   // Event listener management
@@ -397,6 +515,12 @@ export class TapStoryNativeAudio {
     if (index !== -1) {
       this.recordingStartedListeners.splice(index, 1);
     }
+  }
+
+  private clearPendingRecordingStartedListener(): void {
+    if (!this.pendingRecordingStartedListener) return;
+    this.removeRecordingStartedListener(this.pendingRecordingStartedListener);
+    this.pendingRecordingStartedListener = null;
   }
   
   /**
@@ -450,6 +574,7 @@ export class TapStoryNativeAudio {
     this.positionListeners = [];
     this.recordingStartedListeners = [];
     this.playbackCompleteListeners = [];
+    this.pendingRecordingStartedListener = null;
     TapStoryNativeAudio.instance = null;
   }
 }
@@ -463,4 +588,3 @@ export function getTapStoryAudio(): TapStoryNativeAudio {
 export function useTapStoryAudio(): TapStoryNativeAudio {
   return TapStoryNativeAudio.getInstance();
 }
-

@@ -10,6 +10,9 @@
 		13B07FBF1A68108700A75B9A /* Images.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 13B07FB51A68108700A75B9A /* Images.xcassets */; };
 		3E461D99554A48A4959DE609 /* SplashScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */; };
 		3E903687C66358915B9F0E84 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = 25537C8BD982C16AA73AF76A /* PrivacyInfo.xcprivacy */; };
+		4A2C91012F12000100AD1001 /* TapStoryAudioModule.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4A2C91112F12000100AD1001 /* TapStoryAudioModule.swift */; };
+		4A2C91022F12000100AD1001 /* TapStoryAudioModule.m in Sources */ = {isa = PBXBuildFile; fileRef = 4A2C91122F12000100AD1001 /* TapStoryAudioModule.m */; };
+		4A2C91032F12000100AD1001 /* AudioEngineIOS.mm in Sources */ = {isa = PBXBuildFile; fileRef = 4A2C91132F12000100AD1001 /* AudioEngineIOS.mm */; };
 		5BCB363ECEE90CDB3626A88B /* ExpoModulesProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = 67B432B5F5200C008B1D98A1 /* ExpoModulesProvider.swift */; };
 		A6F02C936ABDB3912576FF59 /* libPods-TapStory.a in Frameworks */ = {isa = PBXBuildFile; fileRef = 7ADD44486DB51E56B06EFD47 /* libPods-TapStory.a */; };
 		BB2F792D24A3F905000567C9 /* Expo.plist in Resources */ = {isa = PBXBuildFile; fileRef = BB2F792C24A3F905000567C9 /* Expo.plist */; };
@@ -22,6 +25,10 @@
 		13B07FB61A68108700A75B9A /* Info.plist */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.plist.xml; name = Info.plist; path = TapStory/Info.plist; sourceTree = "<group>"; };
 		25537C8BD982C16AA73AF76A /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xml; name = PrivacyInfo.xcprivacy; path = TapStory/PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		3E7B436D0B101927FEB2013B /* Pods-TapStory.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-TapStory.release.xcconfig"; path = "Target Support Files/Pods-TapStory/Pods-TapStory.release.xcconfig"; sourceTree = "<group>"; };
+		4A2C91112F12000100AD1001 /* TapStoryAudioModule.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; name = TapStoryAudioModule.swift; path = TapStory/TapStoryAudioModule.swift; sourceTree = "<group>"; };
+		4A2C91122F12000100AD1001 /* TapStoryAudioModule.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; name = TapStoryAudioModule.m; path = TapStory/TapStoryAudioModule.m; sourceTree = "<group>"; };
+		4A2C91132F12000100AD1001 /* AudioEngineIOS.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; name = AudioEngineIOS.mm; path = TapStory/AudioEngineIOS.mm; sourceTree = "<group>"; };
+		4A2C91142F12000100AD1001 /* AudioEngineIOS.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; name = AudioEngineIOS.h; path = TapStory/AudioEngineIOS.h; sourceTree = "<group>"; };
 		67B432B5F5200C008B1D98A1 /* ExpoModulesProvider.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; name = ExpoModulesProvider.swift; path = "Pods/Target Support Files/Pods-TapStory/ExpoModulesProvider.swift"; sourceTree = "<group>"; };
 		7ADD44486DB51E56B06EFD47 /* libPods-TapStory.a */ = {isa = PBXFileReference; explicitFileType = archive.ar; includeInIndex = 0; path = "libPods-TapStory.a"; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA286B85B6C04FC6940260E9 /* SplashScreen.storyboard */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = file.storyboard; name = SplashScreen.storyboard; path = TapStory/SplashScreen.storyboard; sourceTree = "<group>"; };
@@ -48,6 +55,10 @@
 			isa = PBXGroup;
 			children = (
 				F11748412D0307B40044C1D9 /* AppDelegate.swift */,
+				4A2C91112F12000100AD1001 /* TapStoryAudioModule.swift */,
+				4A2C91122F12000100AD1001 /* TapStoryAudioModule.m */,
+				4A2C91132F12000100AD1001 /* AudioEngineIOS.mm */,
+				4A2C91142F12000100AD1001 /* AudioEngineIOS.h */,
 				F11748442D0722820044C1D9 /* TapStory-Bridging-Header.h */,
 				BB2F792B24A3F905000567C9 /* Supporting */,
 				13B07FB51A68108700A75B9A /* Images.xcassets */,
@@ -328,6 +339,9 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				4A2C91012F12000100AD1001 /* TapStoryAudioModule.swift in Sources */,
+				4A2C91022F12000100AD1001 /* TapStoryAudioModule.m in Sources */,
+				4A2C91032F12000100AD1001 /* AudioEngineIOS.mm in Sources */,
 				F11748422D0307B40044C1D9 /* AppDelegate.swift in Sources */,
 				5BCB363ECEE90CDB3626A88B /* ExpoModulesProvider.swift in Sources */,
 			);

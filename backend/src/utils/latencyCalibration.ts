@@ -3,6 +3,7 @@ import fs from 'fs';
 import os from 'os';
 import path from 'path';
 import { generateDownloadUrl } from '../services/s3Service';
+import { estimateLatencyMsFromPcm, type PcmData } from './audioCorrelation';
 
 /**
  * Decode an audio file from S3 (by key) to a local mono 16-bit PCM WAV file.
@@ -25,11 +26,6 @@ async function decodeToWavTempFile(key: string): Promise<string> {
   });
 
   return wavPath;
-}
-
-interface PcmData {
-  samples: Int16Array;
-  sampleRate: number;
 }
 
 /**
@@ -77,37 +73,12 @@ function readPcmFromWav(wavPath: string): PcmData {
 }
 
 /**
- * Find the first major transient (e.g., a click) in the PCM samples.
- * Returns the sample index of the transient.
- */
-function findClickSampleIndex(samples: Int16Array): number {
-  let maxAbs = 0;
-  for (let i = 0; i < samples.length; i++) {
-    const val = Math.abs(samples[i]);
-    if (val > maxAbs) maxAbs = val;
-  }
-
-  if (maxAbs === 0) {
-    return 0;
-  }
-
-  const threshold = maxAbs * 0.6; // 60% of max amplitude
-
-  for (let i = 0; i < samples.length; i++) {
-    if (Math.abs(samples[i]) >= threshold) {
-      return i;
-    }
-  }
-
-  return 0;
-}
-
-/**
  * Measure latency between a reference audio file and a test recording.
  * Both are identified by their S3 keys.
  *
- * Assumes both contain the same transient (click) and measures the
- * time difference between the first strong transient in each.
+ * Both files must contain the same guided calibration signal. Normalized
+ * cross-correlation rejects isolated noise much better than thresholding the
+ * first loud sample.
  *
  * Returns latency in milliseconds: test - reference.
  */
@@ -123,18 +94,13 @@ export async function measureLatencyMsForKeys(
     const refPcm = readPcmFromWav(refWav);
     const testPcm = readPcmFromWav(testWav);
 
-    if (refPcm.sampleRate !== testPcm.sampleRate) {
-      throw new Error('Sample rates do not match in calibration files');
+    const estimate = estimateLatencyMsFromPcm(refPcm, testPcm);
+    if (estimate.confidence < 0.2) {
+      throw new Error(
+        `Calibration signal correlation too low (${estimate.confidence.toFixed(3)})`
+      );
     }
-
-    const refIndex = findClickSampleIndex(refPcm.samples);
-    const testIndex = findClickSampleIndex(testPcm.samples);
-
-    const diffSamples = testIndex - refIndex;
-    const diffSeconds = diffSamples / refPcm.sampleRate;
-    const diffMs = diffSeconds * 1000;
-
-    return diffMs;
+    return estimate.offsetMs;
   } finally {
     // Clean up temp files
     try {
@@ -149,5 +115,3 @@ export async function measureLatencyMsForKeys(
     }
   }
 }
-
-

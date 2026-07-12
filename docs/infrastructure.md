@@ -51,7 +51,7 @@ Managed by devenv/direnv:
 
 ```bash
 # Database
-DATABASE_URL=postgresql://tapstory_user:tapstory_password@localhost:5432/tapstory
+DATABASE_URL=postgresql://tapstory_user:tapstory_password@localhost:55432/tapstory
 
 # Storage
 AWS_REGION=
