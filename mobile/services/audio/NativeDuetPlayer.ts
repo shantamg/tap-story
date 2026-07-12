@@ -60,10 +60,12 @@ function hasErrorCode(error: unknown, code: string): boolean {
 
 // Native transport-start rejections that mean the engine went stale (route
 // change/interruption) and can be recovered by reinitializing and reloading.
-// iOS rejects with *_START_ERROR codes, Android with PLAY_ERROR/PLAY_RECORD_ERROR.
+// iOS rejects with *_START_ERROR codes (RECORD_START_ERROR at the capture-arm
+// stage, before the transport starts); Android with PLAY_ERROR/PLAY_RECORD_ERROR.
 const RECOVERABLE_START_ERROR_CODES = [
   'PLAY_START_ERROR',
   'PLAY_RECORD_START_ERROR',
+  'RECORD_START_ERROR',
   'PLAY_ERROR',
   'PLAY_RECORD_ERROR',
 ];
@@ -89,6 +91,13 @@ export class NativeDuetPlayer {
   private initializationPromise?: Promise<void>;
   private sessionCounter = 0;
   private activeSession?: TransportSession;
+  private onPlaybackComplete?: () => void;
+  // The last capture-latency configuration applied to the engine. A route
+  // change destroys the native engine's compensation, so a rebuild-and-retry
+  // must re-apply it or the retried overdub lands mis-synced on Android.
+  private lastCaptureCompensation?:
+    | { mode: 'overdub'; adjustmentMs: number }
+    | { mode: 'captureOnly' };
 
   constructor() {
     this.instanceId = ++instanceCounter;
@@ -144,8 +153,18 @@ export class NativeDuetPlayer {
   async configureLatencyCompensation(adjustmentMs: number = 0): Promise<number> {
     await this.ensureInitialized();
     const appliedMs = await this.nativeAudio.configureLatencyCompensation(adjustmentMs);
+    this.lastCaptureCompensation = { mode: 'overdub', adjustmentMs };
     this.log(`Capture latency compensation: ${appliedMs.toFixed(2)}ms`);
     return appliedMs;
+  }
+
+  /**
+   * Register a callback fired once when playback reaches the end of the
+   * timeline and the transport auto-stops. Without this the UI cannot tell
+   * playback finished and wedges in a "playing" state.
+   */
+  setOnPlaybackComplete(callback: (() => void) | undefined): void {
+    this.onPlaybackComplete = callback;
   }
 
   private async ensureInitialized(): Promise<void> {
@@ -278,8 +297,25 @@ export class NativeDuetPlayer {
     this.assertSessionActive(session);
     await this.initialize();
     this.assertSessionActive(session);
+    // A fresh native engine has zero latency compensation. Re-measure it for
+    // the new route before reloading tracks, or the retried capture gate lands
+    // at requested+0 frames and the overdub is silently misaligned on Android.
+    if (session.capturesAudio) {
+      await this.reapplyCaptureCompensation();
+      this.assertSessionActive(session);
+    }
     await this.nativeAudio.loadTracks(await this.prepareNativeTracks());
     this.assertSessionActive(session);
+  }
+
+  private async reapplyCaptureCompensation(): Promise<void> {
+    const compensation = this.lastCaptureCompensation;
+    if (!compensation) return;
+    if (compensation.mode === 'captureOnly') {
+      await this.nativeAudio.configureCaptureOnlyLatencyCompensation();
+    } else {
+      await this.nativeAudio.configureLatencyCompensation(compensation.adjustmentMs);
+    }
   }
 
   /**
@@ -443,6 +479,8 @@ export class NativeDuetPlayer {
           this.log('Failed to stop completed transport:', error);
           await this.cleanup();
         }
+        // Notify the UI so it can leave the "playing" state instead of wedging.
+        this.onPlaybackComplete?.();
       }
     }, 50);
     this.positionCheckInterval = interval;
@@ -516,19 +554,25 @@ export class NativeDuetPlayer {
 
     // Stop the transport immediately so playback does not continue while a
     // long take is drained/resampled. Native engines deliberately preserve the
-    // capture session until stopRecording() finalizes it.
+    // capture session until stopRecording() finalizes it. A transport-stop
+    // rejection must NOT lose a WAV that stopRecording() then finalizes, so we
+    // capture the stop error and still finalize the take.
+    let transportStopError: unknown;
     try {
-      let result: RecordingResult | null = null;
-      try {
-        await this.nativeAudio.stop();
-      } finally {
-        if (wasRecording) result = await this.nativeAudio.stopRecording();
-      }
+      await this.nativeAudio.stop();
+    } catch (error) {
+      transportStopError = error;
+    }
 
+    try {
+      const result = wasRecording ? await this.nativeAudio.stopRecording() : null;
       if (result) {
         this.log('Recording stopped:', result);
+        return result;
       }
-      return result;
+      // No take was finalized. If the transport stop itself failed, surface it.
+      if (transportStopError) throw transportStopError;
+      return null;
     } catch (error) {
       // Stopping during preroll is a cancellation, not a failed take. Native
       // modules reject because no PCM has crossed the punch gate yet.
@@ -608,6 +652,7 @@ export class NativeDuetPlayer {
       await this.nativeAudio.loadTracks([]);
       this.assertSessionActive(session);
       await this.nativeAudio.configureCaptureOnlyLatencyCompensation();
+      this.lastCaptureCompensation = { mode: 'captureOnly' };
       this.assertSessionActive(session);
       this.isRecording = true;
       this.isPlaying = false;
@@ -615,17 +660,20 @@ export class NativeDuetPlayer {
       this.recordingStartPositionMs = 0;
       this.currentPositionMs = 0;
 
-      await this.nativeAudio.playAndRecord(0, 0, actualStartMs => {
-        if (!this.isSessionActive(session)) {
-          this.log(`Ignoring first microphone frame for cancelled session ${session.id}`);
-          return;
-        }
-        session.captureStarted = true;
-        this.callbackTriggered = true;
-        this.recordingStartPositionMs = actualStartMs;
-        signalCaptureStarted();
-      });
-      this.assertSessionActive(session);
+      // Retry once after rebuilding the engine if the arm/start fails because
+      // the route changed (a fresh engine re-runs capture-only compensation).
+      await this.startTransportWithRetry(session, () =>
+        this.nativeAudio.playAndRecord(0, 0, actualStartMs => {
+          if (!this.isSessionActive(session)) {
+            this.log(`Ignoring first microphone frame for cancelled session ${session.id}`);
+            return;
+          }
+          session.captureStarted = true;
+          this.callbackTriggered = true;
+          this.recordingStartPositionMs = actualStartMs;
+          signalCaptureStarted();
+        })
+      );
 
       if (!session.captureStarted) {
         let timeout: ReturnType<typeof setTimeout> | undefined;

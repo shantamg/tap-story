@@ -62,6 +62,7 @@ export class DuetTrackPlayer {
   private positionCheckInterval?: NodeJS.Timeout;
   private callbackTriggered = false;
   private startedSegments: Set<string> = new Set();
+  private onPlaybackComplete?: () => void;
   
   // Native module for synchronized audio (Android/iOS)
   private nativeEngine: TapStoryAudioEngine | null = null;
@@ -459,8 +460,18 @@ export class DuetTrackPlayer {
         this.log('Reached end of timeline');
         this.isPlaying = false;
         this.stopPositionMonitoring();
+        this.onPlaybackComplete?.();
       }
     }, 50);
+  }
+
+  /**
+   * Register a callback fired once when playback reaches the end of the
+   * timeline. Mirrors NativeDuetPlayer so the component can leave the
+   * "playing" state instead of wedging.
+   */
+  setOnPlaybackComplete(callback: (() => void) | undefined): void {
+    this.onPlaybackComplete = callback;
   }
 
   private stopPositionMonitoring(): void {

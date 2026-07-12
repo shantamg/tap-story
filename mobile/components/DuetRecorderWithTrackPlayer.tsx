@@ -127,6 +127,12 @@ export function DuetRecorderWithTrackPlayer() {
       await recorder.current.init();
       // Initialize the player (either native or expo-av based)
       await player.current.initialize();
+      // Leave the "playing" state when playback reaches the end of the story,
+      // instead of wedging with a frozen playhead and a hidden Play button.
+      player.current.setOnPlaybackComplete(() => {
+        setIsPlaying(false);
+        stopPositionTracking();
+      });
       setUsingNativeAudio(isUsingNativeRef.current);
       
       if (isUsingNativeRef.current) {

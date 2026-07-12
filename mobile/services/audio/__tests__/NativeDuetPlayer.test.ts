@@ -10,6 +10,9 @@ let releaseDeferredInitialize: (() => void) | undefined;
 let deferNextInitialize = false;
 let failNextPlayForRouteChange = false;
 let failNextPlayAndRecordForRouteChange = false;
+let failNextRecordArmForRouteChange = false;
+let failNextStopWithTransportError = false;
+let currentPositionMs = 0;
 
 const recordingResult = {
   uri: 'file:///recording.wav',
@@ -41,6 +44,13 @@ const mockNativeAudio = {
   }),
   playAndRecord: jest.fn(async (_playFromMs: number, recordStartMs: number, callback: (actualStartMs: number) => void) => {
     callOrder.push('playAndRecord');
+    if (failNextRecordArmForRouteChange) {
+      failNextRecordArmForRouteChange = false;
+      throw Object.assign(
+        new Error('Failed to arm recording; route invalidated'),
+        { code: 'RECORD_START_ERROR' }
+      );
+    }
     if (failNextPlayAndRecordForRouteChange) {
       failNextPlayAndRecordForRouteChange = false;
       throw Object.assign(
@@ -64,7 +74,7 @@ const mockNativeAudio = {
   pause: jest.fn(async () => undefined),
   resume: jest.fn(async () => undefined),
   seekTo: jest.fn(async () => undefined),
-  getCurrentPositionMs: jest.fn(async () => 0),
+  getCurrentPositionMs: jest.fn(async () => currentPositionMs),
   startRecording: jest.fn(async () => {
     callOrder.push('startRecording');
   }),
@@ -85,6 +95,10 @@ const mockNativeAudio = {
   }),
   stop: jest.fn(async () => {
     callOrder.push('stop');
+    if (failNextStopWithTransportError) {
+      failNextStopWithTransportError = false;
+      throw Object.assign(new Error('Failed to stop'), { code: 'STOP_ERROR' });
+    }
     if (deferNextStop) {
       deferNextStop = false;
       await new Promise<void>(resolve => {
@@ -121,6 +135,9 @@ describe('NativeDuetPlayer session lifecycle', () => {
     deferNextInitialize = false;
     failNextPlayForRouteChange = false;
     failNextPlayAndRecordForRouteChange = false;
+    failNextRecordArmForRouteChange = false;
+    failNextStopWithTransportError = false;
+    currentPositionMs = 0;
   });
 
   it('reinitializes, reloads, and retries playback once after a route change', async () => {
@@ -165,6 +182,106 @@ describe('NativeDuetPlayer session lifecycle', () => {
     expect(onRecordingStarted).toHaveBeenCalledTimes(1);
 
     await player.stop();
+  });
+
+  it('retries an overdub after an iOS arm-stage RECORD_START_ERROR', async () => {
+    const onRecordingStarted = jest.fn();
+    const player = new NativeDuetPlayer();
+    await player.loadChain([{
+      id: 'segment-1',
+      audioUrl: 'https://example.test/segment.wav',
+      localUri: 'file:///segment.wav',
+      duration: 1,
+      startTime: 0,
+    }]);
+    failNextRecordArmForRouteChange = true;
+
+    await expect(player.playFrom(0, 1, onRecordingStarted)).resolves.toBeUndefined();
+
+    expect(mockNativeAudio.cleanup).toHaveBeenCalledTimes(1);
+    expect(mockNativeAudio.playAndRecord).toHaveBeenCalledTimes(2);
+    expect(onRecordingStarted).toHaveBeenCalledTimes(1);
+
+    await player.stop();
+  });
+
+  it('re-applies overdub latency compensation when rebuilding after a route change', async () => {
+    const onRecordingStarted = jest.fn();
+    const player = new NativeDuetPlayer();
+    await player.loadChain([{
+      id: 'segment-1',
+      audioUrl: 'https://example.test/segment.wav',
+      localUri: 'file:///segment.wav',
+      duration: 1,
+      startTime: 0,
+    }]);
+    await player.configureLatencyCompensation(37);
+    expect(mockNativeAudio.configureLatencyCompensation).toHaveBeenCalledTimes(1);
+    failNextPlayAndRecordForRouteChange = true;
+
+    await player.playFrom(0, 1, onRecordingStarted);
+
+    // Rebuilt engine has zero compensation; it must be re-applied before retry.
+    expect(mockNativeAudio.configureLatencyCompensation).toHaveBeenCalledTimes(2);
+    expect(mockNativeAudio.configureLatencyCompensation).toHaveBeenLastCalledWith(37);
+
+    await player.stop();
+  });
+
+  it('retries a first-take record after a route change and re-applies capture compensation', async () => {
+    emitRecordingStarted = false;
+    const player = new NativeDuetPlayer();
+    await player.initialize();
+    failNextRecordArmForRouteChange = true;
+
+    const startPromise = player.startRecordingOnly();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    // The rebuilt engine re-runs capture-only compensation before the retry.
+    pendingRecordingStartedCallback?.(12);
+    await startPromise;
+
+    expect(mockNativeAudio.cleanup).toHaveBeenCalledTimes(1);
+    expect(mockNativeAudio.playAndRecord).toHaveBeenCalledTimes(2);
+    expect(mockNativeAudio.configureCaptureOnlyLatencyCompensation).toHaveBeenCalledTimes(2);
+
+    await player.stop();
+  });
+
+  it('returns the finalized take even when the transport stop rejects', async () => {
+    const player = new NativeDuetPlayer();
+    await player.initialize();
+    await player.playFrom(0, 1.25, () => undefined);
+    failNextStopWithTransportError = true;
+
+    const result = await player.stop();
+
+    expect(result).toEqual(recordingResult);
+    expect(mockNativeAudio.cleanup).not.toHaveBeenCalled();
+  });
+
+  it('notifies onPlaybackComplete when playback reaches the end of the timeline', async () => {
+    jest.useFakeTimers();
+    const onComplete = jest.fn();
+    const player = new NativeDuetPlayer();
+    player.setOnPlaybackComplete(onComplete);
+    try {
+      await player.loadChain([{
+        id: 'segment-1',
+        audioUrl: 'https://example.test/segment.wav',
+        localUri: 'file:///segment.wav',
+        duration: 1,
+        startTime: 0,
+      }]);
+      await player.playFrom(0);
+
+      currentPositionMs = 2_000; // Past the 1s timeline end.
+      await jest.advanceTimersByTimeAsync(60);
+
+      expect(onComplete).toHaveBeenCalledTimes(1);
+      await expect(player.getPlaybackState()).resolves.toBe('stopped');
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('keeps the take finalizable after stopping the playback transport', async () => {
