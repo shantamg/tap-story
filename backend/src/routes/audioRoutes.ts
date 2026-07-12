@@ -4,6 +4,11 @@ import type { Prisma } from '@prisma/client';
 import { generateUploadUrl, generateDownloadUrl, deleteAudioFile } from '../services/s3Service';
 import { measureLatencyMsForKeys } from '../utils/latencyCalibration';
 import { getReplyStartTimeMs } from '../utils/audioTimeline';
+import {
+  isValidUploadFilename,
+  isValidUploadContentType,
+  isValidAudioKey,
+} from '../utils/audioUploadValidation';
 
 const router = Router();
 const prisma = new PrismaClient();
@@ -117,8 +122,13 @@ router.post('/upload-url', async (req: Request, res: Response) => {
   try {
     const { filename, contentType } = req.body;
 
-    if (!filename) {
-      return res.status(400).json({ error: 'Filename required' });
+    // The filename becomes part of the S3 key, so it must be a safe basename
+    // with an audio extension — never a path or arbitrary string.
+    if (!isValidUploadFilename(filename)) {
+      return res.status(400).json({ error: 'A valid audio filename is required' });
+    }
+    if (!isValidUploadContentType(contentType)) {
+      return res.status(400).json({ error: 'Unsupported audio content type' });
     }
 
     const result = await generateUploadUrl(filename, contentType);
@@ -136,6 +146,12 @@ router.post('/save', async (req: Request, res: Response) => {
 
     if (!key || durationMs === undefined) {
       return res.status(400).json({ error: 'Key and durationMs required' });
+    }
+
+    // Only accept keys this service minted, so a client cannot register an
+    // arbitrary or forged S3 object as an audio node.
+    if (!isValidAudioKey(key)) {
+      return res.status(400).json({ error: 'Invalid audio key' });
     }
 
     if (!Number.isInteger(durationMs) || durationMs <= 0 || durationMs > 2_147_483_647) {

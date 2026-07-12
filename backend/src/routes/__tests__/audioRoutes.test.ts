@@ -106,7 +106,25 @@ describe('Audio Routes', () => {
         .send({});
 
       expect(response.status).toBe(400);
-      expect(response.body.error).toBe('Filename required');
+      expect(response.body.error).toBe('A valid audio filename is required');
+    });
+
+    it('should reject a path-traversal filename', async () => {
+      const response = await request(app)
+        .post('/api/audio/upload-url')
+        .send({ filename: '../../etc/passwd.wav' });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('A valid audio filename is required');
+    });
+
+    it('should reject an unsupported content type', async () => {
+      const response = await request(app)
+        .post('/api/audio/upload-url')
+        .send({ filename: 'recording.wav', contentType: 'text/html' });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Unsupported audio content type');
     });
   });
 
@@ -115,7 +133,7 @@ describe('Audio Routes', () => {
       const response = await request(app)
         .post('/api/audio/save')
         .send({
-          key: 'audio/test.webm',
+          key: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm',
           durationMs: 10_123,
           parentId: null
         });
@@ -127,7 +145,7 @@ describe('Audio Routes', () => {
       expect(response.body.startTimeMs).toBe(0);
       expect(mockCreate).toHaveBeenCalledWith({
         data: {
-          audioUrl: 'audio/test.webm',
+          audioUrl: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm',
           durationMs: 10_123,
           startTimeMs: 0,
           parentId: null,
@@ -147,10 +165,20 @@ describe('Audio Routes', () => {
     it('should return 400 if durationMs is missing', async () => {
       const response = await request(app)
         .post('/api/audio/save')
-        .send({ key: 'audio/test.webm' });
+        .send({ key: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm' });
 
       expect(response.status).toBe(400);
       expect(response.body.error).toBe('Key and durationMs required');
+    });
+
+    it('should reject an arbitrary (non-minted) key', async () => {
+      const response = await request(app)
+        .post('/api/audio/save')
+        .send({ key: 'audio/someone-elses-object.webm', durationMs: 10_123 });
+
+      expect(response.status).toBe(400);
+      expect(response.body.error).toBe('Invalid audio key');
+      expect(mockCreate).not.toHaveBeenCalled();
     });
 
     it('should derive a direct reply start at zero', async () => {
@@ -158,12 +186,12 @@ describe('Audio Routes', () => {
 
       const response = await request(app)
         .post('/api/audio/save')
-        .send({ key: 'audio/test.webm', durationMs: 10_123, parentId: 'parent' });
+        .send({ key: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm', durationMs: 10_123, parentId: 'parent' });
 
       expect(response.status).toBe(201);
       expect(mockCreate).toHaveBeenCalledWith({
         data: {
-          audioUrl: 'audio/test.webm',
+          audioUrl: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm',
           durationMs: 10_123,
           startTimeMs: 0,
           parentId: 'parent',
@@ -179,12 +207,12 @@ describe('Audio Routes', () => {
 
       const response = await request(app)
         .post('/api/audio/save')
-        .send({ key: 'audio/test.webm', durationMs: 4_321, parentId: 'parent' });
+        .send({ key: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm', durationMs: 4_321, parentId: 'parent' });
 
       expect(response.status).toBe(201);
       expect(mockCreate).toHaveBeenCalledWith({
         data: {
-          audioUrl: 'audio/test.webm',
+          audioUrl: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm',
           durationMs: 4_321,
           startTimeMs: 12_346,
           parentId: 'parent',
@@ -197,7 +225,7 @@ describe('Audio Routes', () => {
 
       const response = await request(app)
         .post('/api/audio/save')
-        .send({ key: 'audio/test.webm', durationMs: 4_321, parentId: 'missing' });
+        .send({ key: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm', durationMs: 4_321, parentId: 'missing' });
 
       expect(response.status).toBe(404);
       expect(response.body.error).toBe('Parent audio node not found');
@@ -210,7 +238,7 @@ describe('Audio Routes', () => {
     ])('should reject non-integer or out-of-range duration metadata: %p', async payload => {
       const response = await request(app)
         .post('/api/audio/save')
-        .send({ key: 'audio/test.webm', ...payload });
+        .send({ key: 'audio/3f2504e0-4f89-41d3-9a0c-0305e82c3301-test.webm', ...payload });
 
       expect(response.status).toBe(400);
       expect(response.body.error).toBe(
