@@ -9,7 +9,6 @@
  * - Frame-accurate timestamps
  * - Native multi-track mixing
  */
-import { Platform } from 'react-native';
 import { TapStoryNativeAudio, getTapStoryAudio, TrackInfo, RecordingResult } from './TapStoryNativeAudio';
 import { findCachedAudioPath, downloadAndCacheAudio } from '../audioStorage';
 
@@ -59,6 +58,20 @@ function hasErrorCode(error: unknown, code: string): boolean {
     && (error as { code?: unknown }).code === code;
 }
 
+// Native transport-start rejections that mean the engine went stale (route
+// change/interruption) and can be recovered by reinitializing and reloading.
+// iOS rejects with *_START_ERROR codes, Android with PLAY_ERROR/PLAY_RECORD_ERROR.
+const RECOVERABLE_START_ERROR_CODES = [
+  'PLAY_START_ERROR',
+  'PLAY_RECORD_START_ERROR',
+  'PLAY_ERROR',
+  'PLAY_RECORD_ERROR',
+];
+
+function isRecoverableStartError(error: unknown): boolean {
+  return RECOVERABLE_START_ERROR_CODES.some(code => hasErrorCode(error, code));
+}
+
 /**
  * NativeDuetPlayer - Native audio-backed duet player
  */
@@ -66,7 +79,6 @@ export class NativeDuetPlayer {
   private instanceId: number;
   private nativeAudio: TapStoryNativeAudio;
   private segments: DuetSegment[] = [];
-  private currentRate: number = 1.0;
   private isPlaying = false;
   private isRecording = false;
   private currentPositionMs = 0;
@@ -229,9 +241,16 @@ export class NativeDuetPlayer {
       return;
     }
 
-    // Convert to native format with local URIs
+    await this.nativeAudio.loadTracks(await this.prepareNativeTracks());
+    this.log('Chain loaded successfully');
+  }
+
+  /**
+   * Convert the loaded segments to native track descriptors with local URIs
+   */
+  private async prepareNativeTracks(): Promise<TrackInfo[]> {
     const nativeTracks: TrackInfo[] = [];
-    
+
     for (const segment of this.segments) {
       const uri = await this.getPlaybackUri(segment);
       nativeTracks.push({
@@ -239,12 +258,55 @@ export class NativeDuetPlayer {
         uri: uri,
         startTimeMs: Math.round(segment.startTime * 1000),
       });
-      
+
       this.log(`Prepared track ${segment.id.slice(0, 8)}: startTime=${segment.startTime}s`);
     }
 
-    await this.nativeAudio.loadTracks(nativeTracks);
-    this.log('Chain loaded successfully');
+    return nativeTracks;
+  }
+
+  /**
+   * A route change/interruption invalidates the native engine. Rebuild it and
+   * reload the current tracks so a transport start can be retried.
+   */
+  private async rebuildEngineForSession(session: TransportSession): Promise<void> {
+    this.log('Recoverable transport-start failure; rebuilding native engine');
+    if (this.initialized) {
+      await this.nativeAudio.cleanup();
+      this.initialized = false;
+    }
+    this.assertSessionActive(session);
+    await this.initialize();
+    this.assertSessionActive(session);
+    await this.nativeAudio.loadTracks(await this.prepareNativeTracks());
+    this.assertSessionActive(session);
+  }
+
+  /**
+   * Start the native transport, retrying once after rebuilding the engine if
+   * the start fails because the audio route changed or was interrupted.
+   */
+  private async startTransportWithRetry(
+    session: TransportSession,
+    start: () => Promise<void>
+  ): Promise<void> {
+    try {
+      await start();
+      this.assertSessionActive(session);
+    } catch (error) {
+      if (!this.isSessionActive(session) || !isRecoverableStartError(error)) {
+        await this.cleanupFailedSession(session);
+        throw error;
+      }
+      try {
+        await this.rebuildEngineForSession(session);
+        await start();
+        this.assertSessionActive(session);
+      } catch (retryError) {
+        await this.cleanupFailedSession(session);
+        throw retryError;
+      }
+    }
   }
 
   /**
@@ -316,8 +378,8 @@ export class NativeDuetPlayer {
       // Capture is armed before the punch callback. Track that lifecycle now so
       // Stop during preroll still drains and closes the native writer.
       this.isRecording = true;
-      try {
-        await this.nativeAudio.playAndRecord(positionMs, recordStartMs, (actualStartMs) => {
+      await this.startTransportWithRetry(session, () =>
+        this.nativeAudio.playAndRecord(positionMs, recordStartMs, (actualStartMs) => {
           if (!this.isSessionActive(session)) {
             this.log(`Ignoring recording onset for cancelled session ${session.id}`);
             return;
@@ -328,27 +390,19 @@ export class NativeDuetPlayer {
           this.callbackTriggered = true;
 
           onReachTime();
-        });
-        this.assertSessionActive(session);
-      } catch (error) {
-        await this.cleanupFailedSession(session);
-        throw error;
-      }
-      
+        })
+      );
+
       // Start position monitoring
       this.startPositionMonitoring(session);
     } else {
       // Just playback, no recording
       this.isPlaying = true;
       this.isRecording = false;
-      
-      try {
-        await this.nativeAudio.play(positionMs);
-        this.assertSessionActive(session);
-      } catch (error) {
-        await this.cleanupFailedSession(session);
-        throw error;
-      }
+
+      await this.startTransportWithRetry(session, () =>
+        this.nativeAudio.play(positionMs)
+      );
       this.startPositionMonitoring(session);
     }
   }

@@ -140,6 +140,8 @@ describe('NativeDuetPlayer session lifecycle', () => {
     expect(mockNativeAudio.initialize).toHaveBeenCalledTimes(2);
     expect(mockNativeAudio.loadTracks).toHaveBeenCalledTimes(2);
     expect(mockNativeAudio.play).toHaveBeenCalledTimes(2);
+
+    await player.stop();
   });
 
   it('reinitializes, reloads, and retries an overdub start after a route change', async () => {
@@ -161,6 +163,8 @@ describe('NativeDuetPlayer session lifecycle', () => {
     expect(mockNativeAudio.loadTracks).toHaveBeenCalledTimes(2);
     expect(mockNativeAudio.playAndRecord).toHaveBeenCalledTimes(2);
     expect(onRecordingStarted).toHaveBeenCalledTimes(1);
+
+    await player.stop();
   });
 
   it('keeps the take finalizable after stopping the playback transport', async () => {
